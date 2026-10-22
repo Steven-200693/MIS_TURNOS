@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, date
 from django.db import models
-
+from django.core.exceptions import ValidationError
 
 class Rol(models.Model):
     nombre = models.CharField(max_length=50, unique=True)
@@ -51,6 +51,12 @@ class Empleado(models.Model):
     )
     activo = models.BooleanField(default=True)
 
+    def clean(self):
+        if self.franja and self.franja.rol_id != self.rol_id:
+            raise ValidationError(
+                "La franja elegida no pertenece al rol de este empleado."
+            )
+
     def __str__(self):
         return self.nombre
 
@@ -64,6 +70,9 @@ class Turno(models.Model):
     descanso = models.BooleanField(default=False)
     inicio = models.TimeField(null=True, blank=True)
     fin = models.TimeField(null=True, blank=True)
+    remoto = models.BooleanField(default=False)
+    manual = models.BooleanField(default=False)   # ← NUEVA
+    novedad = models.CharField(max_length=15, blank=True, default='')   # ← NUEVA
 
     class Meta:
         unique_together = ('empleado', 'fecha')
@@ -71,3 +80,46 @@ class Turno(models.Model):
     def __str__(self):
         estado = "Descanso" if self.descanso else f"{self.inicio}-{self.fin}"
         return f"{self.empleado} · {self.fecha} · {estado}"
+
+
+class AsignacionSemanal(models.Model):
+    lunes = models.DateField()
+    franja = models.ForeignKey(Franja, on_delete=models.CASCADE)
+    cantidad = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        unique_together = ('lunes', 'franja')
+        ordering = ['lunes', 'franja__hora_inicio']
+
+    def __str__(self):
+        return f"{self.lunes} · {self.franja} · {self.cantidad} técnicos"
+
+
+class Novedad(models.Model):
+    TIPOS = [
+        ('COMPENSATORIO', 'Descanso compensatorio'),
+        ('INCAPACIDAD', 'Incapacidad'),
+        ('VACACIONES', 'Vacaciones'),
+        ('PERMISO', 'Permiso'),
+    ]
+
+    empleado = models.ForeignKey(Empleado, on_delete=models.CASCADE)
+    tipo = models.CharField(max_length=15, choices=TIPOS)
+    fecha_inicio = models.DateField()
+    fecha_fin = models.DateField()
+    nota = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        ordering = ['-fecha_inicio']
+        verbose_name = "novedad"
+        verbose_name_plural = "novedades"
+
+    def clean(self):
+        if isinstance(self.fecha_inicio, date) and isinstance(self.fecha_fin, date):
+            if self.fecha_fin < self.fecha_inicio:
+                raise ValidationError('La fecha final no puede ser anterior a la inicial.')
+            if (self.fecha_fin - self.fecha_inicio).days > 365:
+                raise ValidationError('Una novedad no puede durar más de un año.')
+
+    def __str__(self):
+        return f"{self.empleado} · {self.get_tipo_display()} · {self.fecha_inicio} a {self.fecha_fin}"

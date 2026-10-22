@@ -1,0 +1,91 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Personal y horarios</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 text-slate-800">
+  <main class="max-w-6xl mx-auto p-4">
+
+    <div class="flex flex-wrap items-center gap-3 mb-4">
+      <h1 class="text-2xl font-bold">Personal y horarios</h1>
+      <a href="{% url 'index' %}" class="sm:ml-auto px-3 py-2 bg-white rounded shadow hover:bg-slate-50">← Volver a los turnos</a>
+    </div>
+
+    <p class="text-sm text-slate-600 mb-4">
+      Para empezar desde cero, el orden es: primero los <b>roles</b>, luego las <b>franjas</b> de cada rol y al final los <b>empleados</b>.
+    </p>
+
+    <div id="mensaje" class="mb-4"></div>
+
+    <!-- Empleados -->
+    <section class="mb-8">
+      <div class="flex items-center mb-2">
+        <h2 class="text-lg font-bold">Empleados</h2>
+        <button id="btn-nuevo-empleado" class="ml-auto px-3 py-2 bg-indigo-600 text-white rounded shadow hover:bg-indigo-700">+ Nuevo empleado</button>
+      </div>
+      <div class="overflow-x-auto bg-white rounded-xl shadow">
+        <table id="tabla-empleados" class="w-full text-sm border-collapse"></table>
+      </div>
+    </section>
+
+    <!-- Novedades -->
+    <section class="mb-8">
+      <div class="flex items-center mb-2">
+        <h2 class="text-lg font-bold">Novedades (descansos extra, incapacidades, vacaciones)</h2>
+        <button id="btn-nueva-novedad" class="ml-auto px-3 py-2 bg-indigo-600 text-white rounded shadow hover:bg-indigo-700">+ Nueva novedad</button>
+      </div>
+      <div class="overflow-x-auto bg-white rounded-xl shadow">
+        <table id="tabla-novedades" class="w-full text-sm border-collapse"></table>
+      </div>
+      <p class="text-xs text-slate-500 mt-1">
+        Al guardar o borrar una novedad se recalculan las semanas ya generadas en esas fechas. Los ajustes manuales (✎) se respetan.
+      </p>
+    </section>
+
+
+    <!-- Franjas -->
+    <section class="mb-8">
+      <div class="flex items-center mb-2">
+        <h2 class="text-lg font-bold">Franjas horarias</h2>
+        <button id="btn-nueva-franja" class="ml-auto px-3 py-2 bg-indigo-600 text-white rounded shadow hover:bg-indigo-700">+ Nueva franja</button>
+      </div>
+      <div class="overflow-x-auto bg-white rounded-xl shadow">
+        <table id="tabla-franjas" class="w-full text-sm border-collapse"></table>
+      </div>
+      <p class="text-xs text-slate-500 mt-1">
+        «Activos / necesarios» indica si hay gente suficiente para cubrir los 7 días, ya que cada persona descansa uno.
+      </p>
+    </section>
+
+    <!-- Roles -->
+    <section class="mb-8">
+      <div class="flex items-center mb-2">
+        <h2 class="text-lg font-bold">Roles</h2>
+        <button id="btn-nuevo-rol" class="ml-auto px-3 py-2 bg-indigo-600 text-white rounded shadow hover:bg-indigo-700">+ Nuevo rol</button>
+      </div>
+      <div class="overflow-x-auto bg-white rounded-xl shadow">
+        <table id="tabla-roles" class="w-full text-sm border-collapse"></table>
+      </div>
+    </section>
+  </main>
+
+  <!-- Ventana emergente reutilizable para los tres formularios -->
+  <dialog id="dialogo" class="rounded-xl shadow-xl w-full max-w-md p-0 backdrop:bg-black/40">
+    <form id="formulario" class="p-5">
+      <h2 id="dialogo-titulo" class="text-lg font-bold mb-4"></h2>
+      <div id="dialogo-campos"></div>
+      <p id="dialogo-error" class="text-sm text-red-700 mb-3"></p>
+      <div class="flex justify-end gap-2">
+        <button type="button" id="dialogo-cancelar" class="px-4 py-2 bg-slate-100 rounded hover:bg-slate-200">Cancelar</button>
+        <button type="submit" class="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700">Guardar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="{% static 'horarios/js/personal.js' %}"></script>
+</body>
+</html>
