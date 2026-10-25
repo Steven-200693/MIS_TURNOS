@@ -43,6 +43,7 @@ class Empleado(models.Model):
 
     nombre = models.CharField(max_length=100)
     rol = models.ForeignKey(Rol, on_delete=models.PROTECT)
+    fecha_ingreso = models.DateField(null=True, blank=True)
     franja = models.ForeignKey(
         Franja, on_delete=models.SET_NULL, null=True, blank=True
     )

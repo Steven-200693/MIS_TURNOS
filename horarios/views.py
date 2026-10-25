@@ -13,9 +13,11 @@ from django.views.decorators.http import require_GET, require_POST
 
 from .models import AsignacionSemanal, Empleado, Franja, Novedad, Rol, Turno
 from .servicios import (
-    CambioInvalido, CoberturaInsuficiente, cambiar_descansos, cambiar_horario,
+    FESTIVOS_COLOMBIA_2026, CambioInvalido, CoberturaInsuficiente,
+    cambiar_descansos, cambiar_franja_tecnico, cambiar_horario,
     _asignaciones_fin_de_semana, distribucion_tecnicos_semana, generar_semana,
-    intercambiar_descansos, lunes_de, regenerar_rango,
+    intercambiar_descansos, intercambiar_fin_de_semana_supervisores, lunes_de,
+    regenerar_rango,
 )
 
 # ===============================================================
@@ -59,6 +61,7 @@ def api_semana(request):
             'inicio': t.inicio.strftime('%H:%M') if t.inicio else None,
             'fin': t.fin.strftime('%H:%M') if t.fin else None,
             'franja': t.franja.nombre if t.franja else None,
+            'franja_id': t.franja_id,
             'remoto': t.remoto,
             'manual': t.manual,          # ← la línea nueva de la Etapa 7
             'novedad': t.novedad,        # ← la línea nueva de la Etapa 7
@@ -80,16 +83,32 @@ def api_semana(request):
 
         novedades = sum(1 for turno in turnos.values() if turno['novedad'])
         if e.id in asignaciones_fin_de_semana:
+            horas_meta = 0
             dia_cobertura = asignaciones_fin_de_semana[e.id]
-            horas_meta = sum(
-                e.rol.horas_por_dia
-                for dia in range(5)
-                if not turnos.get(dias[dia].isoformat(), {}).get('novedad')
-            )
-            if dia_cobertura is not None and not turnos.get(
-                dias[dia_cobertura].isoformat(), {}
-            ).get('novedad'):
-                horas_meta += 12
+            for indice, dia in enumerate(dias):
+                turno = turnos.get(dia.isoformat(), {})
+                if turno.get('novedad'):
+                    continue
+                if dia in FESTIVOS_COLOMBIA_2026:
+                    if (
+                        not turno.get('descanso')
+                        and turno.get('inicio')
+                        and turno.get('fin')
+                    ):
+                        horas_meta += 12
+                elif indice < 5:
+                    horas_meta += e.rol.horas_por_dia
+                elif (
+                    not turno.get('descanso')
+                    and turno.get('inicio')
+                    and turno.get('fin')
+                ):
+                    horas_meta += 12
+                elif (
+                    dia_cobertura == indice
+                    and dia.isoformat() not in turnos
+                ):
+                    horas_meta += 12
         else:
             horas_meta = max(0, 6 - novedades) * e.rol.horas_por_dia
         empleados.append({
@@ -110,7 +129,24 @@ def api_semana(request):
     return JsonResponse({
         'lunes': lunes.isoformat(),
         'dias': [d.isoformat() for d in dias],
+        'festivos': [
+            {'fecha': dia.isoformat(), 'nombre': nombre}
+            for dia, nombre in FESTIVOS_COLOMBIA_2026.items()
+            if dia in dias
+        ],
         'empleados': empleados,
+        'franjas': [
+            {
+                'id': franja.id,
+                'rol': franja.rol.nombre,
+                'nombre': franja.nombre,
+                'hora_inicio': franja.hora_inicio.strftime('%H:%M'),
+                'hora_fin': franja.hora_fin().strftime('%H:%M'),
+            }
+            for franja in Franja.objects.select_related('rol').order_by(
+                'rol__nombre', 'hora_inicio'
+            )
+        ],
         'distribucion_tecnicos': {
             'total': len(tecnicos_sin_franja),
             'configurada': configurada,
@@ -124,7 +160,7 @@ def api_semana(request):
                     'cantidad_minima': (
                         max(
                             0,
-                            2 - Empleado.objects.filter(
+                            1 - Empleado.objects.filter(
                                 activo=True, franja=franja
                             ).count(),
                         )
@@ -230,6 +266,7 @@ def api_personal(request):
 
     empleados = [
         {'id': e.id, 'nombre': e.nombre, 'rol_id': e.rol_id, 'rol': e.rol.nombre,
+         'fecha_ingreso': e.fecha_ingreso.isoformat() if e.fecha_ingreso else None,
          'franja_id': e.franja_id, 'franja': e.franja.nombre if e.franja else None,
          'preferencia_descanso': e.preferencia_descanso, 'activo': e.activo}
         for e in Empleado.objects.select_related('rol', 'franja').order_by(
@@ -259,9 +296,33 @@ def _validar_rol(rol):
 @require_POST
 @solo_staff
 def api_empleado_guardar(request):
+    datos = _leer_json(request)
+    if datos is None:
+        return JsonResponse({'error': 'Los datos enviados no son válidos.'}, status=400)
+    rol = Rol.objects.filter(pk=datos.get('rol_id')).first()
+    es_tecnico = bool(
+        rol
+        and rol.nombre.casefold().replace('é', 'e') == 'tecnico'
+    )
+    if es_tecnico and not datos.get('id') and not datos.get('fecha_ingreso'):
+        return JsonResponse(
+            {'error': 'La fecha de ingreso es obligatoria para crear un técnico.'},
+            status=400,
+        )
+    if 'fecha_ingreso' in datos and datos['fecha_ingreso'] is not None:
+        try:
+            date.fromisoformat(datos['fecha_ingreso'])
+        except (TypeError, ValueError):
+            return JsonResponse(
+                {'error': 'La fecha de ingreso no es válida. Usa AAAA-MM-DD.'},
+                status=400,
+            )
     return _guardar(
         request, Empleado,
-        ['nombre', 'rol_id', 'franja_id', 'preferencia_descanso', 'activo'],
+        [
+            'nombre', 'rol_id', 'fecha_ingreso', 'franja_id',
+            'preferencia_descanso', 'activo',
+        ],
     )
 
 
@@ -390,7 +451,7 @@ def api_distribucion_tecnicos_guardar(request):
     )
     minimo_noche = max(
         0,
-        2 - Empleado.objects.filter(activo=True, franja=franja_noche).count(),
+        1 - Empleado.objects.filter(activo=True, franja=franja_noche).count(),
     )
     if cantidades[franja_noche.id] < minimo_noche:
         return JsonResponse(
@@ -501,6 +562,22 @@ def api_turno_intercambiar(request):
 
 @require_POST
 @solo_staff
+def api_supervisor_fin_de_semana_intercambiar(request):
+    datos = _leer_json(request) or {}
+    a = _buscar_empleado(datos.get('empleado_id'))
+    b = _buscar_empleado(datos.get('companero_id'))
+    fecha = _fecha_estricta(datos.get('fecha'))
+    if a is None or b is None or fecha is None:
+        return JsonResponse(
+            {'error': 'Faltan datos: supervisores o fecha.'}, status=400
+        )
+    return _respuesta_cambio(
+        lambda: intercambiar_fin_de_semana_supervisores(a, b, fecha)
+    )
+
+
+@require_POST
+@solo_staff
 def api_turno_horario(request):
     datos = _leer_json(request) or {}
     empleado = _buscar_empleado(datos.get('empleado_id'))
@@ -517,6 +594,32 @@ def api_turno_horario(request):
         )
     return _respuesta_cambio(
         lambda: cambiar_horario(empleado, fecha, inicio)
+    )
+
+
+@require_POST
+@solo_staff
+def api_tecnico_franja(request):
+    datos = _leer_json(request) or {}
+    empleado = _buscar_empleado(datos.get('empleado_id'))
+    fecha = _fecha_estricta(datos.get('fecha'))
+    franja_id = datos.get('franja_id')
+    if (
+        empleado is None
+        or fecha is None
+        or not isinstance(franja_id, int)
+        or isinstance(franja_id, bool)
+    ):
+        return JsonResponse(
+            {'error': 'Faltan datos: técnico, fecha o franja.'}, status=400
+        )
+    return _respuesta_cambio(
+        lambda: cambiar_franja_tecnico(
+            empleado,
+            fecha,
+            franja_id,
+            forzar=bool(datos.get('forzar')),
+        )
     )
 
 

@@ -28,7 +28,13 @@ urlpatterns = [
     # Edición manual de turnos
     path('api/turnos/descanso/', views.api_turno_descanso, name='api_turno_descanso'),
     path('api/turnos/intercambiar/', views.api_turno_intercambiar, name='api_turno_intercambiar'),
+    path(
+        'api/supervisores/fin-de-semana/intercambiar/',
+        views.api_supervisor_fin_de_semana_intercambiar,
+        name='api_supervisor_fin_de_semana_intercambiar',
+    ),
     path('api/turnos/horario/', views.api_turno_horario, name='api_turno_horario'),
+    path('api/tecnicos/franja/', views.api_tecnico_franja, name='api_tecnico_franja'),
     path('api/novedades/guardar/', views.api_novedad_guardar, name='api_novedad_guardar'),
     path('api/novedades/eliminar/', views.api_novedad_eliminar, name='api_novedad_eliminar'),
 ]

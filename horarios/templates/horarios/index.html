@@ -43,7 +43,7 @@
         <p class="text-sm text-slate-600 mb-3">
           Define cuántos técnicos quieres en cada franja. Los cupos deben sumar
           todos los técnicos activos que no tienen una franja fija. Noche (16:00–23:00)
-          debe tener personal suficiente para alternar descansos y no quedar descubierta.
+          debe tener al menos un técnico asignado.
         </p>
         <div id="distribucion-tecnicos" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3"></div>
         <div class="flex flex-wrap items-center justify-between gap-3 mt-3">
@@ -98,6 +98,12 @@
 
       <div id="dt-mover" class="mb-4 p-3 rounded bg-slate-50">
         <p id="dt-mover-texto" class="text-sm mb-2"></p>
+        <label id="dt-mover-destino-label" for="dt-mover-destino"
+               class="hidden block text-sm font-medium mb-2">
+          Elegir el nuevo día de descanso (puedes elegir un permiso)
+        </label>
+        <select id="dt-mover-destino"
+                class="hidden w-full border border-slate-300 rounded px-3 py-2 bg-white mb-2"></select>
         <button id="dt-mover-btn" type="button" class="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 text-sm">
           Mover el descanso a este día
         </button>
@@ -110,6 +116,34 @@
         <select id="dt-companero" class="w-full border border-slate-300 rounded px-3 py-2 bg-white mb-2"></select>
         <button id="dt-cambio-btn" type="button" class="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 text-sm">
           Intercambiar descansos
+        </button>
+      </div>
+
+      <div id="dt-franja-tecnico" class="hidden mb-4 p-3 rounded bg-slate-50">
+        <label for="dt-franja-select" class="block text-sm font-medium mb-1">
+          Cambiar franja del técnico durante toda esta semana
+        </label>
+        <select id="dt-franja-select"
+                class="w-full border border-slate-300 rounded px-3 py-2 bg-white mb-2"></select>
+        <button id="dt-franja-btn" type="button"
+                class="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 text-sm">
+          Cambiar franja semanal
+        </button>
+      </div>
+
+      <div id="dt-fin-semana" class="hidden mb-4 p-3 rounded bg-slate-50">
+        <label for="dt-supervisor-companero" class="block text-sm font-medium mb-1">
+          Cambiar el turno de fin de semana con otro supervisor
+        </label>
+        <p class="text-xs text-slate-500 mb-2">
+          Si eliges a alguien libre ambos días, asumirá este turno y tú descansarás
+          sábado y domingo. También puedes intercambiar los turnos entre supervisores.
+        </p>
+        <select id="dt-supervisor-companero"
+                class="w-full border border-slate-300 rounded px-3 py-2 bg-white mb-2"></select>
+        <button id="dt-fin-semana-btn" type="button"
+                class="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 text-sm">
+          Aplicar cambio
         </button>
       </div>
 
@@ -142,7 +176,7 @@
     </div>
   </dialog>
 
-  <script src="{% static 'horarios/js/app.js' %}"></script>
+  <script src="{% static 'horarios/js/app.js' %}?v=20261022-descanso-permiso"></script>
 </body>
 </html>
 

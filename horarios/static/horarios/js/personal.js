@@ -144,12 +144,12 @@ function pintarEmpleados() {
 
     return {
       inactiva: !e.activo,
-      celdas: [e.nombre, e.rol, e.franja || 'Sin franja',
+      celdas: [e.nombre, e.rol, e.fecha_ingreso || 'Sin registrar', e.franja || 'Sin franja',
                etiquetaPreferencia(e.preferencia_descanso), estado, acciones],
     };
   });
   dibujarTabla($empleados,
-    ['Nombre', 'Rol', 'Franja', 'Descanso preferido', 'Estado', 'Acciones'],
+    ['Nombre', 'Rol', 'Fecha de ingreso', 'Franja', 'Descanso preferido', 'Estado', 'Acciones'],
     filas, 'Todavía no hay empleados.');
 }
 
@@ -247,18 +247,25 @@ function formEmpleado(empleado = {}) {
     mostrarMensaje('Primero crea al menos un rol.', 'error');
     return;
   }
+  const hoy = new Date();
+  const fechaHoy = [
+    hoy.getFullYear(),
+    String(hoy.getMonth() + 1).padStart(2, '0'),
+    String(hoy.getDate()).padStart(2, '0'),
+  ].join('-');
   const controles = abrirFormulario(empleado.id ? 'Editar empleado' : 'Nuevo empleado', [
     { nombre: 'nombre', etiqueta: 'Nombre completo', tipo: 'text' },
     { nombre: 'rol_id', etiqueta: 'Rol', tipo: 'select', numerico: true,
       opciones: datos.roles.map(r => ({ valor: r.id, texto: r.nombre })) },
+    { nombre: 'fecha_ingreso', etiqueta: 'Fecha de ingreso (obligatoria para técnicos)', tipo: 'date', opcional: true },
     { nombre: 'franja_id', etiqueta: 'Franja', tipo: 'select', numerico: true,
       opciones: [{ valor: '', texto: 'Sin franja' }] },
     { nombre: 'preferencia_descanso', etiqueta: 'Día de descanso preferido', tipo: 'select',
       opciones: PREFERENCIAS },
-  ], empleado, async (cuerpo) => {
+  ], { fecha_ingreso: empleado.fecha_ingreso || '', ...empleado }, async (cuerpo) => {
     await enviar('/api/empleados/guardar/', cuerpo);
     await cargar();
-    mostrarMensaje('Empleado guardado. Genera los turnos para incluirlo en el horario.');
+    mostrarMensaje('Empleado guardado. Sus turnos empezarán desde la fecha de ingreso al generar el horario.');
   });
 
   // La lista de franjas depende del rol elegido
@@ -270,8 +277,23 @@ function formEmpleado(empleado = {}) {
   const refrescarFranjas = (seleccion) =>
     llenarSelect(controles.franja_id, opcionesFranja(controles.rol_id.value), seleccion);
 
+  const actualizarFechaIngresoObligatoria = () => {
+    const rol = datos.roles.find(item => item.id === Number(controles.rol_id.value));
+    const esTecnico = rol
+      && rol.nombre.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+        === 'tecnico';
+    controles.fecha_ingreso.required = Boolean(esTecnico);
+    if (esTecnico && !controles.fecha_ingreso.value && !empleado.id) {
+      controles.fecha_ingreso.value = fechaHoy;
+    }
+  };
+
   refrescarFranjas(empleado.franja_id);
-  controles.rol_id.addEventListener('change', () => refrescarFranjas(''));
+  actualizarFechaIngresoObligatoria();
+  controles.rol_id.addEventListener('change', () => {
+    refrescarFranjas('');
+    actualizarFechaIngresoObligatoria();
+  });
 }
 
 async function cambiarActivo(empleado, activo) {

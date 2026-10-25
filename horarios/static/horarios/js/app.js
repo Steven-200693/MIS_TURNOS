@@ -185,7 +185,10 @@ function mostrarError(texto) {
 // BLOQUE D: Dibujar la tabla
 // =====================================================================
 function celdaTurno(turno, esHoy, emp, dia) {
-  let clases = 'p-2 text-center border-l border-slate-100' + (esHoy ? ' bg-indigo-100' : '');
+  const festivo = datosSemana?.festivos?.find(item => item.fecha === dia);
+  let clases = 'p-2 text-center border-l border-slate-100';
+  if (festivo) clases += ' bg-amber-50';
+  if (esHoy) clases += ' bg-indigo-100';
   const tieneHorario = turno && turno.inicio && turno.fin;
   const editable = ES_ADMIN && turno && !turno.novedad && (turno.descanso || tieneHorario);
   if (editable) clases += ' cursor-pointer hover:bg-slate-100';
@@ -254,10 +257,22 @@ function pintar(datos) {
   filaHead.appendChild(el('th', 'p-3 text-left sticky left-0 bg-slate-800', 'Empleado'));
   datos.dias.forEach((d, i) => {
     const f = desdeTexto(d);
-    const th = el('th', 'p-2 font-semibold' + (d === hoy ? ' bg-indigo-600' : ''));
+    const festivo = datos.festivos?.find(item => item.fecha === d);
+    let clases = 'p-2 font-semibold';
+    if (festivo) clases += ' bg-amber-700';
+    if (d === hoy) clases += ' bg-indigo-600';
+    const th = el('th', clases);
+    if (festivo) th.title = `Festivo: ${festivo.nombre}`;
     th.appendChild(el('div', '', DIAS[i]));
     th.appendChild(el('div', 'text-xs font-normal opacity-80',
       `${f.getDate()} ${MESES[f.getMonth()]}`));
+    if (festivo) {
+      th.appendChild(el(
+        'div',
+        'mt-1 text-[10px] leading-tight font-medium',
+        `Festivo · ${festivo.nombre}`
+      ));
+    }
     filaHead.appendChild(th);
   });
   filaHead.appendChild(el('th', 'p-3', 'Horas'));
@@ -459,10 +474,18 @@ const $dtTitulo = document.getElementById('dt-titulo');
 const $dtSub = document.getElementById('dt-sub');
 const $dtMover = document.getElementById('dt-mover');
 const $dtMoverTexto = document.getElementById('dt-mover-texto');
+const $dtMoverDestinoLabel = document.getElementById('dt-mover-destino-label');
+const $dtMoverDestino = document.getElementById('dt-mover-destino');
 const $dtMoverBtn = document.getElementById('dt-mover-btn');
 const $dtCambio = document.getElementById('dt-cambio');
 const $dtCompanero = document.getElementById('dt-companero');
 const $dtCambioBtn = document.getElementById('dt-cambio-btn');
+const $dtFranjaTecnico = document.getElementById('dt-franja-tecnico');
+const $dtFranjaSelect = document.getElementById('dt-franja-select');
+const $dtFranjaBtn = document.getElementById('dt-franja-btn');
+const $dtFinSemana = document.getElementById('dt-fin-semana');
+const $dtSupervisorCompanero = document.getElementById('dt-supervisor-companero');
+const $dtFinSemanaBtn = document.getElementById('dt-fin-semana-btn');
 const $dtHorario = document.getElementById('dt-horario');
 const $dtInicio = document.getElementById('dt-inicio');
 const $dtHorarioBtn = document.getElementById('dt-horario-btn');
@@ -488,12 +511,56 @@ function abrirEdicion(emp, dia) {
     `${emp.rol} · ${emp.franja || 'Sin franja'} · ${nombreDia(dia)} ${f.getDate()} ${MESES[f.getMonth()]}`;
 
   // Opción 1: mover el descanso a este día (solo si hoy trabaja)
-  const puedeMover = !turno.descanso && actual !== null;
+  const esSupervisor = emp.rol.toLowerCase() === 'supervisor';
+  const esTecnico = emp.rol.normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '').toLowerCase() === 'tecnico';
+  const indiceDia = datosSemana.dias.indexOf(dia);
+  const indiceCalendario = desdeTexto(dia).getDay();
+  const esFinDeSemana =
+    indiceDia === 5 || indiceDia === 6 || indiceCalendario === 0 || indiceCalendario === 6;
+  const usaIntercambioFinSemana = esSupervisor && esFinDeSemana;
+  const descansoEnCasilla = actual === dia;
+  const diasAlternativos = Object.entries(emp.turnos)
+    .filter(([fecha, estado]) =>
+      fecha !== actual
+      && !estado.descanso
+      && (
+        (!estado.novedad && Boolean(estado.inicio))
+        || estado.novedad === 'PERMISO'
+      )
+    )
+    .map(([fecha, estado]) => ({ fecha, reemplazaPermiso: estado.novedad === 'PERMISO' }));
+  const puedeMover =
+    !usaIntercambioFinSemana
+    && actual !== null
+    && (!turno.descanso || diasAlternativos.length > 0);
   $dtMover.classList.toggle('hidden', !puedeMover);
+  $dtMoverDestinoLabel.classList.toggle('hidden', !puedeMover || !descansoEnCasilla);
+  $dtMoverDestino.classList.toggle('hidden', !puedeMover || !descansoEnCasilla);
   if (puedeMover) {
-    $dtMoverTexto.textContent =
-      `Hoy descansa el ${nombreDia(actual)}. Ese día pasará a ser de trabajo ` +
-      `y las horas de la semana no cambian.`;
+    if (descansoEnCasilla) {
+      $dtMoverTexto.textContent =
+        `Este día es el descanso actual de ${emp.nombre}. Elige otro día laborable ` +
+        `o un día de permiso; ${nombreDia(actual)} pasará a ser de trabajo. ` +
+        'Si eliges un permiso, esa fecha se reemplazará por el descanso.';
+      $dtMoverDestino.replaceChildren();
+      diasAlternativos.forEach(({ fecha, reemplazaPermiso }) => {
+        const fechaOpcion = desdeTexto(fecha);
+        $dtMoverDestino.add(new Option(
+          `${nombreDia(fecha)} ${fechaOpcion.getDate()} ${MESES[fechaOpcion.getMonth()]}` +
+          (reemplazaPermiso
+            ? ' · permiso se reemplazará por descanso'
+            : ' · pasa a descanso'),
+          fecha,
+        ));
+      });
+      $dtMoverBtn.textContent = 'Cambiar día de descanso';
+    } else {
+      $dtMoverTexto.textContent =
+        `Hoy descansa el ${nombreDia(actual)}. Ese día pasará a ser de trabajo ` +
+        'y las horas de la semana no cambian.';
+      $dtMoverBtn.textContent = 'Mover el descanso a este día';
+    }
   }
 
   // Opción 2: intercambiar con un compañero del mismo rol (primero los que descansan este día)
@@ -507,15 +574,83 @@ function abrirEdicion(emp, dia) {
       `${c.nombre} · ${c.franja || 'sin franja'} · descansa el ${nombreDia(diaDescanso(c))}`, c.id));
   });
   const hayCompaneros = companeros.length > 0 && actual !== null;
-  $dtCambio.classList.toggle('hidden', !hayCompaneros);
+  $dtCambio.classList.toggle(
+    'hidden',
+    usaIntercambioFinSemana || !hayCompaneros
+  );
 
-  const puedeEditarHorario = !turno.descanso && !turno.novedad && Boolean(turno.inicio);
+  const estadoFinDeSemana = persona => {
+    const sabado = persona.turnos[datosSemana.dias[5]];
+    const domingo = persona.turnos[datosSemana.dias[6]];
+    if (!sabado || !domingo) return null;
+    return `${sabado.descanso ? 'R' : 'T'}${domingo.descanso ? 'R' : 'T'}`;
+  };
+  const patronActual = estadoFinDeSemana(emp);
+  const supervisores = usaIntercambioFinSemana
+    ? datosSemana.empleados.filter(persona =>
+      persona.id !== emp.id
+      && persona.rol.toLowerCase() === 'supervisor'
+      && patronActual !== null
+      && estadoFinDeSemana(persona) !== null
+      && estadoFinDeSemana(persona) !== patronActual
+    )
+    : [];
+  $dtSupervisorCompanero.replaceChildren();
+  supervisores.forEach(persona => {
+    const sabado = persona.turnos[datosSemana.dias[5]];
+    const domingo = persona.turnos[datosSemana.dias[6]];
+    const patron = sabado.descanso && domingo.descanso
+      ? 'libre todo el fin de semana'
+      : sabado.descanso
+        ? 'trabaja domingo'
+        : 'trabaja sábado';
+    $dtSupervisorCompanero.add(new Option(`${persona.nombre} · ${patron}`, persona.id));
+  });
+  if (usaIntercambioFinSemana && !turno.descanso) {
+    $dtFinSemana.querySelector('label').textContent =
+      `Cambiar el turno del ${nombreDia(dia)} de ${emp.nombre}`;
+  } else {
+    $dtFinSemana.querySelector('label').textContent =
+      'Cambiar el turno de fin de semana con otro supervisor';
+  }
+  $dtFinSemana.classList.toggle('hidden', !usaIntercambioFinSemana);
+
+  const puedeEditarHorario =
+    !usaIntercambioFinSemana
+    && !turno.descanso
+    && !turno.novedad
+    && Boolean(turno.inicio);
   $dtHorario.classList.toggle('hidden', !puedeEditarHorario);
   $dtInicio.value = puedeEditarHorario ? turno.inicio : '';
 
-  if (!puedeMover && !hayCompaneros && !puedeEditarHorario) {
+  const franjasTecnico = esTecnico
+    ? datosSemana.franjas.filter(franja => franja.rol === emp.rol)
+    : [];
+  $dtFranjaSelect.replaceChildren();
+  franjasTecnico.forEach(franja => {
+    $dtFranjaSelect.add(new Option(
+      `${franja.nombre} · ${franja.hora_inicio}–${franja.hora_fin}`,
+      franja.id,
+      false,
+      franja.nombre === emp.franja
+    ));
+  });
+  $dtFranjaTecnico.classList.toggle(
+    'hidden',
+    !esTecnico || franjasTecnico.length < 2
+  );
+
+  if (
+    !puedeMover && !hayCompaneros && !puedeEditarHorario
+    && !(usaIntercambioFinSemana && supervisores.length > 0)
+    && !(esTecnico && franjasTecnico.length > 1)
+  ) {
     $dtError.textContent =
-      'No hay cambios disponibles para esta casilla.';
+      turno.descanso && actual === dia && diasAlternativos.length === 0
+        ? 'No hay otro día laborable disponible sin novedad para mover el descanso.'
+        : usaIntercambioFinSemana
+        ? 'No hay otro supervisor disponible con un patrón distinto para intercambiar.'
+        : 'No hay cambios disponibles para esta casilla.';
   }
   $dlg.showModal();
 }
@@ -543,7 +678,9 @@ async function ejecutarCambio(url, cuerpo) {
 $dtMoverBtn.addEventListener('click', () => {
   ejecutarCambio('/api/turnos/descanso/', {
     empleado_id: contexto.emp.id,
-    fecha: contexto.dia,
+    fecha: contexto.emp.turnos[contexto.dia].descanso
+      ? $dtMoverDestino.value
+      : contexto.dia,
   });
 });
 
@@ -551,6 +688,22 @@ $dtCambioBtn.addEventListener('click', () => {
   ejecutarCambio('/api/turnos/intercambiar/', {
     empleado_id: contexto.emp.id,
     companero_id: Number($dtCompanero.value),
+    fecha: contexto.dia,
+  });
+});
+
+$dtFranjaBtn.addEventListener('click', () => {
+  ejecutarCambio('/api/tecnicos/franja/', {
+    empleado_id: contexto.emp.id,
+    fecha: contexto.dia,
+    franja_id: Number($dtFranjaSelect.value),
+  });
+});
+
+$dtFinSemanaBtn.addEventListener('click', () => {
+  ejecutarCambio('/api/supervisores/fin-de-semana/intercambiar/', {
+    empleado_id: contexto.emp.id,
+    companero_id: Number($dtSupervisorCompanero.value),
     fecha: contexto.dia,
   });
 });
