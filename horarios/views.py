@@ -1,4 +1,6 @@
 import json
+import random
+from io import BytesIO
 from datetime import date, datetime, timedelta
 from functools import wraps
 
@@ -6,15 +8,19 @@ from django.contrib.admin.views.decorators import staff_member_required
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Count, Q
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
-from .models import AsignacionSemanal, Empleado, Franja, Novedad, Rol, Turno
+from .models import (
+    AsignacionActaRetribucion, AsignacionSemanal, Empleado, Franja,
+    Novedad, Rol, Turno,
+)
 from .servicios import (
     FESTIVOS_COLOMBIA_2026, CambioInvalido, CoberturaInsuficiente,
-    cambiar_descansos, cambiar_franja_tecnico, cambiar_horario,
+    agregar_descanso, cambiar_descansos, cambiar_franja_tecnico,
+    cambiar_horario, convertir_descanso_en_trabajo,
     _asignaciones_fin_de_semana, distribucion_tecnicos_semana, generar_semana,
     intercambiar_descansos, intercambiar_fin_de_semana_supervisores, lunes_de,
     regenerar_rango,
@@ -172,6 +178,388 @@ def api_semana(request):
             ],
         },
     })
+
+
+@require_GET
+def api_dashboard_descansos(request):
+    empleados = list(
+        Empleado.objects.filter(activo=True).filter(
+            Q(rol__nombre__iexact='Tecnico')
+            | Q(rol__nombre__iexact='Técnico')
+            | Q(rol__nombre__iexact='Supervisor')
+        ).select_related('rol').order_by('rol__nombre', 'nombre')
+    )
+    ids_empleados = [empleado.id for empleado in empleados]
+    turnos = list(
+        Turno.objects.filter(
+            empleado_id__in=ids_empleados,
+        ).order_by('fecha').values_list(
+            'empleado_id', 'fecha', 'descanso', 'novedad', 'inicio', 'fin'
+        )
+    )
+    fechas_por_empleado = {
+        empleado_id: set() for empleado_id in ids_empleados
+    }
+    descansos = {empleado_id: set() for empleado_id in ids_empleados}
+    trabajados = {empleado_id: set() for empleado_id in ids_empleados}
+    for empleado_id, fecha, es_descanso, novedad, inicio, fin in turnos:
+        fechas_por_empleado[empleado_id].add(fecha)
+        if es_descanso:
+            descansos[empleado_id].add(fecha)
+        elif not novedad and inicio and fin:
+            trabajados[empleado_id].add(fecha)
+
+    fecha_inicio = min(
+        (turno[1] for turno in turnos),
+        default=None,
+    )
+    fecha_fin = max(
+        (turno[1] for turno in turnos),
+        default=None,
+    )
+    grupos = {}
+    for empleado in empleados:
+        dias_descanso = descansos[empleado.id]
+        sabados = {fecha for fecha in dias_descanso if fecha.weekday() == 5}
+        domingos = {fecha for fecha in dias_descanso if fecha.weekday() == 6}
+        festivos_descanso = sorted(
+            fecha.isoformat() for fecha in FESTIVOS_COLOMBIA_2026
+            if fecha in dias_descanso
+        )
+        festivos_trabajados = sorted(
+            fecha.isoformat() for fecha in FESTIVOS_COLOMBIA_2026
+            if fecha in trabajados[empleado.id]
+        )
+        fines_de_semana_observados = {
+            fecha for fecha in fechas_por_empleado[empleado.id]
+            if fecha.weekday() == 5
+            and fecha + timedelta(days=1) in fechas_por_empleado[empleado.id]
+        }
+        fila = {
+            'id': empleado.id,
+            'nombre': empleado.nombre,
+            'total_descansos': len(dias_descanso),
+            'sabados_descanso': len(sabados),
+            'domingos_descanso': len(domingos),
+            'festivos_descanso': festivos_descanso,
+            'total_festivos_descanso': len(festivos_descanso),
+            'festivos_trabajados': festivos_trabajados,
+            'total_festivos_trabajados': len(festivos_trabajados),
+            'dias_descanso_fin_semana': len(sabados) + len(domingos),
+            'fines_semana_completos': sum(
+                1 for sabado in fines_de_semana_observados
+                if sabado in dias_descanso
+                and sabado + timedelta(days=1) in dias_descanso
+            ),
+            'fines_semana_observados': len(fines_de_semana_observados),
+        }
+        grupos.setdefault(empleado.rol.nombre, []).append(fila)
+
+    resumen = {}
+    for rol, filas in grupos.items():
+        cantidad = len(filas)
+        resumen[rol] = {
+            'personas': cantidad,
+            'promedio_descansos_fin_semana': round(
+                sum(fila['dias_descanso_fin_semana'] for fila in filas)
+                / cantidad,
+                1,
+            ) if cantidad else 0,
+            'promedio_fines_semana_completos': round(
+                sum(fila['fines_semana_completos'] for fila in filas)
+                / cantidad,
+                1,
+            ) if cantidad else 0,
+            'promedio_festivos_descanso': round(
+                sum(fila['total_festivos_descanso'] for fila in filas)
+                / cantidad,
+                1,
+            ) if cantidad else 0,
+            'promedio_festivos_trabajados': round(
+                sum(fila['total_festivos_trabajados'] for fila in filas)
+                / cantidad,
+                1,
+            ) if cantidad else 0,
+        }
+
+    return JsonResponse({
+        'fecha_inicio': fecha_inicio.isoformat() if fecha_inicio else None,
+        'fecha_fin': fecha_fin.isoformat() if fecha_fin else None,
+        'grupos': grupos,
+        'resumen': resumen,
+    })
+
+
+@require_GET
+def api_acta_retribucion(request):
+    fecha = _leer_fecha(request.GET.get('fecha'))
+    if fecha is None:
+        return JsonResponse(
+            {'error': 'Fecha inválida. Usa el formato AAAA-MM-DD.'},
+            status=400,
+        )
+    mes = fecha.replace(day=1)
+    supervisores = list(
+        Empleado.objects.filter(
+            activo=True,
+            rol__nombre__iexact='Supervisor',
+        ).order_by('nombre', 'id')
+    )
+    asignacion = None
+    if supervisores:
+        asignacion = AsignacionActaRetribucion.objects.filter(
+            mes=mes
+        ).select_related('supervisor__rol').first()
+        if asignacion is None:
+            asignacion, _ = AsignacionActaRetribucion.objects.get_or_create(
+                mes=mes,
+                defaults={'supervisor': random.choice(supervisores)},
+            )
+        if not asignacion.supervisor.activo or (
+            asignacion.supervisor.rol.nombre.casefold() != 'supervisor'
+        ):
+            asignacion.supervisor = random.choice(supervisores)
+            asignacion.save(update_fields=['supervisor'])
+
+    return JsonResponse({
+        'mes': mes.strftime('%Y-%m'),
+        'asignacion': (
+            {
+                'supervisor_id': asignacion.supervisor_id,
+                'supervisor': asignacion.supervisor.nombre,
+            }
+            if asignacion else None
+        ),
+        'supervisores': [
+            {'id': supervisor.id, 'nombre': supervisor.nombre}
+            for supervisor in supervisores
+        ],
+    })
+
+
+@require_POST
+def api_acta_retribucion_reasignar(request):
+    if not (request.user.is_authenticated and request.user.is_staff):
+        return JsonResponse(
+            {'error': 'Debes iniciar sesión como administrador en /admin/.'},
+            status=403,
+        )
+    datos = _leer_json(request)
+    if datos is None:
+        return JsonResponse({'error': 'Los datos enviados no son válidos.'}, status=400)
+    fecha_texto = datos.get('fecha')
+    fecha = _leer_fecha(fecha_texto) if isinstance(fecha_texto, str) else None
+    supervisor_id = datos.get('supervisor_id')
+    if (
+        fecha is None
+        or isinstance(supervisor_id, bool)
+        or not isinstance(supervisor_id, int)
+    ):
+        return JsonResponse(
+            {'error': 'Indica el mes y un supervisor válido.'},
+            status=400,
+        )
+    supervisor = Empleado.objects.filter(
+        pk=supervisor_id,
+        activo=True,
+        rol__nombre__iexact='Supervisor',
+    ).first()
+    if supervisor is None:
+        return JsonResponse(
+            {'error': 'El supervisor seleccionado no está activo o no existe.'},
+            status=400,
+        )
+
+    mes = fecha.replace(day=1)
+    asignacion, _ = AsignacionActaRetribucion.objects.update_or_create(
+        mes=mes,
+        defaults={'supervisor': supervisor},
+    )
+    return JsonResponse({
+        'ok': True,
+        'mes': mes.strftime('%Y-%m'),
+        'asignacion': {
+            'supervisor_id': asignacion.supervisor_id,
+            'supervisor': asignacion.supervisor.nombre,
+        },
+    })
+
+
+@require_GET
+def api_exportar_semana_excel(request):
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+    except ImportError:
+        return JsonResponse(
+            {
+                'error': (
+                    'La exportación a Excel requiere openpyxl. Instala las '
+                    'dependencias con «py -m pip install -r requirements.txt» '
+                    'usando el mismo entorno de Python que ejecuta Django.'
+                )
+            },
+            status=503,
+        )
+
+    fecha = _leer_fecha(request.GET.get('fecha'))
+    if fecha is None:
+        return JsonResponse(
+            {'error': 'Fecha inválida. Usa el formato AAAA-MM-DD.'},
+            status=400,
+        )
+
+    lunes = lunes_de(fecha)
+    dias = [lunes + timedelta(days=indice) for indice in range(7)]
+    empleados = Empleado.objects.filter(
+        activo=True,
+    ).filter(
+        Q(rol__nombre__iexact='Tecnico')
+        | Q(rol__nombre__iexact='Técnico')
+        | Q(rol__nombre__iexact='Supervisor')
+    ).select_related('rol', 'franja').order_by(
+        'rol__nombre', 'franja__hora_inicio', 'nombre'
+    )
+    turnos = Turno.objects.filter(
+        empleado__in=empleados,
+        fecha__in=dias,
+    ).select_related('franja').order_by('fecha')
+    turnos_por_empleado = {}
+    for turno in turnos:
+        turnos_por_empleado.setdefault(turno.empleado_id, {})[
+            turno.fecha
+        ] = turno
+
+    libro = Workbook()
+    hoja = libro.active
+    hoja.title = 'Horario semanal'
+    hoja.sheet_view.showGridLines = False
+    hoja.merge_cells('A1:J1')
+    titulo = hoja['A1']
+    titulo.value = f'Horario semanal · {lunes:%d/%m/%Y} – {(lunes + timedelta(days=6)):%d/%m/%Y}'
+    titulo.font = Font(name='Arial', size=16, bold=True, color='FFFFFF')
+    titulo.fill = PatternFill('solid', fgColor='1E3A8A')
+    titulo.alignment = Alignment(vertical='center')
+    hoja.row_dimensions[1].height = 30
+
+    encabezados = ['Rol', 'Empleado', 'Franja']
+    for dia in dias:
+        nombre_dia = (
+            'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'
+        )[dia.weekday()]
+        festivo = FESTIVOS_COLOMBIA_2026.get(dia)
+        encabezados.append(
+            f'{nombre_dia} {dia:%d/%m}' + (f' · {festivo}' if festivo else '')
+        )
+    hoja.append([])
+    hoja.append(encabezados)
+    for celda in hoja[3]:
+        celda.font = Font(bold=True, color='FFFFFF')
+        celda.fill = PatternFill('solid', fgColor='334155')
+        celda.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    hoja.row_dimensions[3].height = 34
+
+    colores_franja = {
+        '06:00': 'FEF08A',
+        '09:00': 'FEF08A',
+        '12:00': 'FEF08A',
+        '13:00': 'BBF7D0',
+        '16:00': '60A5FA',
+        '23:00': '111827',
+    }
+    colores_novedad = {
+        'COMPENSATORIO': 'A7F3D0',
+        'INCAPACIDAD': 'FECDD3',
+        'VACACIONES': 'BAE6FD',
+        'PERMISO': 'DDD6FE',
+    }
+    nombre_novedad = dict(Novedad.TIPOS)
+    for empleado in empleados:
+        turnos_empleado = turnos_por_empleado.get(empleado.id, {})
+        franja = next(
+            (
+                turno.franja for turno in turnos_empleado.values()
+                if turno.franja_id
+            ),
+            empleado.franja,
+        )
+        fila = [
+            empleado.rol.nombre,
+            empleado.nombre,
+            franja.nombre if franja else 'Sin franja',
+        ]
+        celdas_turno = []
+        for dia in dias:
+            turno = turnos_empleado.get(dia)
+            if turno is None:
+                fila.append('')
+                celdas_turno.append((None, None))
+            elif turno.novedad:
+                fila.append(nombre_novedad.get(turno.novedad, turno.novedad))
+                celdas_turno.append((colores_novedad.get(turno.novedad, 'E2E8F0'), False))
+            elif turno.descanso:
+                fila.append('Descanso')
+                celdas_turno.append(('FDE68A', False))
+            elif turno.inicio and turno.fin:
+                cruza = turno.fin < turno.inicio
+                valor = f'{turno.inicio:%H:%M}–{turno.fin:%H:%M}'
+                if cruza:
+                    valor += ' (+1)'
+                if turno.remoto:
+                    valor += ' (DS)'
+                hora_franja = (
+                    turno.franja.hora_inicio.strftime('%H:%M')
+                    if turno.franja_id else turno.inicio.strftime('%H:%M')
+                )
+                color_franja = colores_franja.get(hora_franja, 'F1F5F9')
+                if empleado.rol.nombre.strip().casefold() == 'supervisor':
+                    if hora_franja == '09:00':
+                        color_franja = 'FCA5A5'
+                    elif hora_franja == '12:00':
+                        color_franja = 'BBF7D0'
+                fila.append(valor)
+                celdas_turno.append(
+                    (color_franja, True)
+                )
+            else:
+                fila.append('')
+                celdas_turno.append((None, None))
+        hoja.append(fila)
+        fila_numero = hoja.max_row
+        for indice, (color, es_turno) in enumerate(celdas_turno, start=4):
+            celda = hoja.cell(fila_numero, indice)
+            if color:
+                celda.fill = PatternFill('solid', fgColor=color)
+            celda.alignment = Alignment(horizontal='center', vertical='center')
+            if es_turno:
+                color_texto = 'FFFFFF' if color == '111827' else '0F172A'
+                celda.font = Font(bold=True, color=color_texto)
+        hoja.cell(fila_numero, 1).alignment = Alignment(vertical='center')
+        hoja.cell(fila_numero, 2).alignment = Alignment(vertical='center')
+        hoja.cell(fila_numero, 3).alignment = Alignment(vertical='center')
+        hoja.row_dimensions[fila_numero].height = 24
+
+    hoja.freeze_panes = 'D4'
+    hoja.auto_filter.ref = f'A3:J{hoja.max_row}'
+    for columna, ancho in {
+        'A': 16, 'B': 30, 'C': 22, 'D': 20, 'E': 20,
+        'F': 20, 'G': 20, 'H': 20, 'I': 20, 'J': 20,
+    }.items():
+        hoja.column_dimensions[columna].width = ancho
+
+    salida = BytesIO()
+    libro.save(salida)
+    respuesta = HttpResponse(
+        salida.getvalue(),
+        content_type=(
+            'application/vnd.openxmlformats-officedocument.'
+            'spreadsheetml.sheet'
+        ),
+    )
+    respuesta['Content-Disposition'] = (
+        f'attachment; filename="horario-semana-{lunes.isoformat()}.xlsx"'
+    )
+    return respuesta
 
 
 # ===============================================================
@@ -543,6 +931,34 @@ def api_turno_descanso(request):
         return JsonResponse({'error': 'Faltan datos: empleado o fecha.'}, status=400)
     return _respuesta_cambio(
         lambda: cambiar_descansos([(empleado, fecha)], forzar=bool(datos.get('forzar')))
+    )
+
+
+@require_POST
+@solo_staff
+def api_turno_descanso_agregar(request):
+    datos = _leer_json(request) or {}
+    empleado = _buscar_empleado(datos.get('empleado_id'))
+    fecha = _fecha_estricta(datos.get('fecha'))
+    if empleado is None or fecha is None:
+        return JsonResponse({'error': 'Faltan datos: empleado o fecha.'}, status=400)
+    return _respuesta_cambio(
+        lambda: agregar_descanso(
+            empleado, fecha, forzar=bool(datos.get('forzar'))
+        )
+    )
+
+
+@require_POST
+@solo_staff
+def api_turno_descanso_trabajar(request):
+    datos = _leer_json(request) or {}
+    empleado = _buscar_empleado(datos.get('empleado_id'))
+    fecha = _fecha_estricta(datos.get('fecha'))
+    if empleado is None or fecha is None:
+        return JsonResponse({'error': 'Faltan datos: empleado o fecha.'}, status=400)
+    return _respuesta_cambio(
+        lambda: convertir_descanso_en_trabajo(empleado, fecha)
     )
 
 

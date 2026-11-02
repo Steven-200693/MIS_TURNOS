@@ -1,12 +1,159 @@
-from datetime import date, timedelta
+from datetime import date, time, timedelta
+from io import BytesIO
+from unittest.mock import patch
 
 from django.contrib.auth.models import User
 from django.test import TestCase
+from openpyxl import load_workbook
 
-from .models import AsignacionSemanal, Empleado, Franja, Novedad, Rol, Turno
-from .servicios import (
-    FESTIVOS_COLOMBIA_2026, _asignaciones_fin_de_semana, generar_semana,
+from .models import (
+    AsignacionActaRetribucion, AsignacionSemanal, Empleado, Franja, Novedad,
+    Rol, Turno,
 )
+from .servicios import (
+    FESTIVOS_COLOMBIA_2026, _asignaciones_fin_de_semana,
+    cambiar_horario, convertir_descanso_en_trabajo, generar_semana,
+)
+
+
+class AsignacionActaRetribucionTests(TestCase):
+    def setUp(self):
+        self.rol = Rol.objects.create(nombre='Supervisor', horas_por_dia=6)
+        self.franja = Franja.objects.create(
+            rol=self.rol,
+            nombre='Mañana',
+            hora_inicio='06:00',
+        )
+        self.supervisores = [
+            Empleado.objects.create(
+                nombre=f'Supervisor {indice}',
+                rol=self.rol,
+                franja=self.franja,
+            )
+            for indice in range(2)
+        ]
+        self.admin = User.objects.create_user(
+            username='admin-acta',
+            password='password',
+            is_staff=True,
+        )
+
+    def test_asigna_aleatoriamente_una_vez_por_mes_y_conserva_la_asignacion(self):
+        with patch(
+            'horarios.views.random.choice',
+            return_value=self.supervisores[1],
+        ) as elegir:
+            primera = self.client.get(
+                '/api/acta-retribucion/',
+                {'fecha': '2026-10-28'},
+            )
+            segunda = self.client.get(
+                '/api/acta-retribucion/',
+                {'fecha': '2026-10-01'},
+            )
+
+        self.assertEqual(primera.status_code, 200)
+        self.assertEqual(segunda.status_code, 200)
+        self.assertEqual(primera.json()['mes'], '2026-10')
+        self.assertEqual(
+            primera.json()['asignacion']['supervisor_id'],
+            self.supervisores[1].id,
+        )
+        self.assertEqual(
+            segunda.json()['asignacion']['supervisor_id'],
+            self.supervisores[1].id,
+        )
+        self.assertEqual(elegir.call_count, 1)
+        self.assertEqual(AsignacionActaRetribucion.objects.count(), 1)
+
+    def test_crea_una_asignacion_independiente_para_cada_mes(self):
+        with patch(
+            'horarios.views.random.choice',
+            side_effect=[self.supervisores[0], self.supervisores[1]],
+        ) as elegir:
+            octubre = self.client.get(
+                '/api/acta-retribucion/',
+                {'fecha': '2026-10-31'},
+            )
+            noviembre = self.client.get(
+                '/api/acta-retribucion/',
+                {'fecha': '2026-11-01'},
+            )
+            noviembre_repetido = self.client.get(
+                '/api/acta-retribucion/',
+                {'fecha': '2026-11-27'},
+            )
+
+        self.assertEqual(octubre.json()['mes'], '2026-10')
+        self.assertEqual(noviembre.json()['mes'], '2026-11')
+        self.assertEqual(
+            octubre.json()['asignacion']['supervisor_id'],
+            self.supervisores[0].id,
+        )
+        self.assertEqual(
+            noviembre.json()['asignacion']['supervisor_id'],
+            self.supervisores[1].id,
+        )
+        self.assertEqual(
+            noviembre_repetido.json()['asignacion']['supervisor_id'],
+            self.supervisores[1].id,
+        )
+        self.assertEqual(elegir.call_count, 2)
+        self.assertEqual(AsignacionActaRetribucion.objects.count(), 2)
+
+    def test_admin_puede_reasignar_el_acta_del_mes(self):
+        self.client.force_login(self.admin)
+        respuesta = self.client.post(
+            '/api/acta-retribucion/reasignar/',
+            data={
+                'fecha': '2026-10-01',
+                'supervisor_id': self.supervisores[0].id,
+            },
+            content_type='application/json',
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(
+            respuesta.json()['asignacion']['supervisor_id'],
+            self.supervisores[0].id,
+        )
+        self.assertEqual(AsignacionActaRetribucion.objects.count(), 1)
+        self.assertEqual(
+            self.client.get(
+                '/api/acta-retribucion/',
+                {'fecha': '2026-10-31'},
+            ).json()['asignacion']['supervisor_id'],
+            self.supervisores[0].id,
+        )
+
+    def test_reasignar_requiere_administrador_y_supervisor_activo(self):
+        cuerpo = {
+            'fecha': '2026-10-01',
+            'supervisor_id': self.supervisores[0].id,
+        }
+        no_autorizado = self.client.post(
+            '/api/acta-retribucion/reasignar/',
+            data=cuerpo,
+            content_type='application/json',
+        )
+        self.assertEqual(no_autorizado.status_code, 403)
+
+        self.client.force_login(self.admin)
+        fecha_invalida = self.client.post(
+            '/api/acta-retribucion/reasignar/',
+            data={'fecha': [], 'supervisor_id': self.supervisores[0].id},
+            content_type='application/json',
+        )
+        self.assertEqual(fecha_invalida.status_code, 400)
+
+        self.supervisores[0].activo = False
+        self.supervisores[0].save(update_fields=['activo'])
+        inactivo = self.client.post(
+            '/api/acta-retribucion/reasignar/',
+            data=cuerpo,
+            content_type='application/json',
+        )
+        self.assertEqual(inactivo.status_code, 400)
 
 
 class LimpiarSemanaTests(TestCase):
@@ -177,6 +324,229 @@ class LimpiarSemanaTests(TestCase):
         self.assertEqual(respuesta.status_code, 200)
         self.assertEqual(respuesta.json()['festivos'], [])
 
+    def test_exporta_excel_con_turnos_y_dias_de_descanso(self):
+        generar_semana(self.lunes)
+        rol_supervisor = Rol.objects.create(
+            nombre='Supervisor', horas_por_dia=6
+        )
+        franja_supervisor = Franja.objects.create(
+            rol=rol_supervisor,
+            nombre='Supervisor 9 a 3',
+            hora_inicio='09:00',
+        )
+        supervisor = Empleado.objects.create(
+            nombre='Supervisor de prueba',
+            rol=rol_supervisor,
+            franja=franja_supervisor,
+        )
+        franja_supervisor_tarde = Franja.objects.create(
+            rol=rol_supervisor,
+            nombre='Supervisor 12 a 6',
+            hora_inicio='12:00',
+        )
+        supervisor_tarde = Empleado.objects.create(
+            nombre='Supervisor tarde de prueba',
+            rol=rol_supervisor,
+            franja=franja_supervisor_tarde,
+        )
+        Turno.objects.create(
+            empleado=supervisor,
+            franja=franja_supervisor,
+            fecha=self.lunes,
+            inicio='09:00',
+            fin='15:00',
+        )
+        Turno.objects.create(
+            empleado=supervisor_tarde,
+            franja=franja_supervisor_tarde,
+            fecha=self.lunes,
+            inicio='12:00',
+            fin='18:00',
+        )
+
+        respuesta = self.client.get(
+            '/api/semana/exportar-excel/',
+            {'fecha': self.lunes.isoformat()},
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(
+            respuesta['Content-Type'],
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        self.assertIn('.xlsx', respuesta['Content-Disposition'])
+        libro = load_workbook(BytesIO(respuesta.content), data_only=True)
+        hoja = libro['Horario semanal']
+        self.assertEqual(hoja['A3'].value, 'Rol')
+        self.assertEqual(hoja['B3'].value, 'Empleado')
+        self.assertEqual(hoja['C3'].value, 'Franja')
+        self.assertEqual(hoja['D3'].value, 'Lun 19/10')
+        fila_tecnico = next(
+            fila for fila in range(4, hoja.max_row + 1)
+            if hoja.cell(fila, 2).value == self.empleado.nombre
+        )
+        fila_supervisor = next(
+            fila for fila in range(4, hoja.max_row + 1)
+            if hoja.cell(fila, 2).value == supervisor.nombre
+        )
+        fila_supervisor_tarde = next(
+            fila for fila in range(4, hoja.max_row + 1)
+            if hoja.cell(fila, 2).value == supervisor_tarde.nombre
+        )
+        self.assertEqual(
+            hoja.cell(fila_supervisor, 4).fill.fgColor.rgb[-6:],
+            'FCA5A5',
+        )
+        self.assertEqual(
+            hoja.cell(fila_supervisor_tarde, 4).fill.fgColor.rgb[-6:],
+            'BBF7D0',
+        )
+        valores_turno = [
+            hoja.cell(fila_tecnico, columna).value
+            for columna in range(4, 11)
+        ]
+        self.assertIn('Descanso', valores_turno)
+        self.assertTrue(any(
+            isinstance(valor, str) and '–' in valor
+            for valor in valores_turno
+        ))
+        self.assertEqual(hoja.freeze_panes, 'D4')
+
+    def test_exportar_excel_rechaza_fecha_invalida(self):
+        respuesta = self.client.get(
+            '/api/semana/exportar-excel/',
+            {'fecha': 'fecha-invalida'},
+        )
+
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('error', respuesta.json())
+
+    def test_dashboard_descansos_resume_historial_por_rol_y_fines_de_semana(self):
+        supervisor_rol = Rol.objects.create(
+            nombre='Supervisor', horas_por_dia=6
+        )
+        supervisor_franja = Franja.objects.create(
+            rol=supervisor_rol,
+            nombre='Supervisor mañana',
+            hora_inicio='06:00',
+        )
+        supervisor = Empleado.objects.create(
+            nombre='Supervisora de prueba',
+            rol=supervisor_rol,
+            franja=supervisor_franja,
+        )
+        for fecha in (
+            date(2026, 1, 3),
+            date(2026, 1, 4),
+            date(2026, 1, 5),
+            date(2026, 1, 10),
+            date(2026, 1, 11),
+        ):
+            Turno.objects.create(
+                empleado=self.empleado,
+                franja=self.empleado.franja,
+                fecha=fecha,
+                descanso=fecha in {
+                    date(2026, 1, 3),
+                    date(2026, 1, 4),
+                    date(2026, 1, 5),
+                    date(2026, 1, 10),
+                },
+                inicio=None if fecha in {
+                    date(2026, 1, 3),
+                    date(2026, 1, 4),
+                    date(2026, 1, 5),
+                    date(2026, 1, 10),
+                } else '06:00',
+                fin=None if fecha in {
+                    date(2026, 1, 3),
+                    date(2026, 1, 4),
+                    date(2026, 1, 5),
+                    date(2026, 1, 10),
+                } else '12:00',
+            )
+        for fecha in (date(2026, 1, 3), date(2026, 1, 4)):
+            Turno.objects.create(
+                empleado=supervisor,
+                franja=supervisor_franja,
+                fecha=fecha,
+                descanso=True,
+            )
+
+        respuesta = self.client.get('/api/dashboard/descansos/')
+
+        self.assertEqual(respuesta.status_code, 200)
+        datos = respuesta.json()
+        tecnico = datos['grupos']['Técnico'][0]
+        self.assertEqual(tecnico['nombre'], self.empleado.nombre)
+        self.assertEqual(tecnico['total_descansos'], 4)
+        self.assertEqual(tecnico['sabados_descanso'], 2)
+        self.assertEqual(tecnico['domingos_descanso'], 1)
+        self.assertEqual(tecnico['dias_descanso_fin_semana'], 3)
+        self.assertEqual(tecnico['fines_semana_completos'], 1)
+        self.assertEqual(tecnico['fines_semana_observados'], 2)
+        self.assertEqual(datos['grupos']['Supervisor'][0]['total_descansos'], 2)
+        self.assertEqual(datos['fecha_inicio'], '2026-01-03')
+        self.assertEqual(datos['fecha_fin'], '2026-01-11')
+        self.assertEqual(
+            datos['resumen']['Técnico']['promedio_descansos_fin_semana'],
+            3,
+        )
+
+        Turno.objects.filter(
+            empleado=self.empleado,
+            fecha=date(2026, 1, 3),
+        ).update(descanso=False)
+        respuesta_actualizada = self.client.get('/api/dashboard/descansos/')
+        tecnico_actualizado = respuesta_actualizada.json()['grupos']['Técnico'][0]
+        self.assertEqual(tecnico_actualizado['total_descansos'], 3)
+        self.assertEqual(tecnico_actualizado['sabados_descanso'], 1)
+        self.assertEqual(tecnico_actualizado['dias_descanso_fin_semana'], 2)
+        self.assertEqual(tecnico_actualizado['fines_semana_completos'], 0)
+
+    def test_dashboard_descansos_devuelve_grupos_vacios_sin_historial(self):
+        respuesta = self.client.get('/api/dashboard/descansos/')
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertIsNone(respuesta.json()['fecha_inicio'])
+        self.assertIsNone(respuesta.json()['fecha_fin'])
+        self.assertEqual(respuesta.json()['grupos']['Técnico'][0]['total_descansos'], 0)
+
+    def test_dashboard_muestra_festivos_trabajados_y_descansados_solo_con_fecha(self):
+        fecha_descanso = date(2026, 1, 1)
+        fecha_trabajo = date(2026, 1, 12)
+        Turno.objects.create(
+            empleado=self.empleado,
+            franja=self.empleado.franja,
+            fecha=fecha_descanso,
+            descanso=True,
+        )
+        Turno.objects.create(
+            empleado=self.empleado,
+            franja=self.empleado.franja,
+            fecha=fecha_trabajo,
+            inicio='06:00',
+            fin='13:00',
+        )
+
+        respuesta = self.client.get('/api/dashboard/descansos/')
+
+        self.assertEqual(respuesta.status_code, 200)
+        datos = respuesta.json()
+        tecnico = datos['grupos']['Técnico'][0]
+        self.assertEqual(tecnico['total_festivos_descanso'], 1)
+        self.assertEqual(tecnico['festivos_descanso'], ['2026-01-01'])
+        self.assertEqual(tecnico['total_festivos_trabajados'], 1)
+        self.assertEqual(tecnico['festivos_trabajados'], ['2026-01-12'])
+        self.assertEqual(
+            datos['resumen']['Técnico']['promedio_festivos_descanso'],
+            1,
+        )
+        self.assertEqual(
+            datos['resumen']['Técnico']['promedio_festivos_trabajados'],
+            1,
+        )
+
 
 class RotacionFinDeSemanaSupervisoresTests(TestCase):
     def setUp(self):
@@ -233,6 +603,67 @@ class RotacionFinDeSemanaSupervisoresTests(TestCase):
             ).count(),
             1,
         )
+
+    def test_rotacion_de_festivos_cambia_supervisor_y_manual_asigna_ds(self):
+        festivo_uno = date(2026, 11, 2)
+        festivo_dos = date(2026, 11, 16)
+
+        generar_semana(festivo_uno)
+        guardia_uno = Turno.objects.get(
+            empleado__in=self.supervisores,
+            fecha=festivo_uno,
+            descanso=False,
+        ).empleado
+        generar_semana(festivo_dos)
+        guardia_dos = Turno.objects.get(
+            empleado__in=self.supervisores,
+            fecha=festivo_dos,
+            descanso=False,
+        ).empleado
+
+        self.assertNotEqual(guardia_uno.id, guardia_dos.id)
+
+        supervisor_objetivo = next(
+            supervisor for supervisor in self.supervisores
+            if supervisor.id != guardia_dos.id
+        )
+        convertir_descanso_en_trabajo(supervisor_objetivo, festivo_dos)
+
+        guardia_manual = Turno.objects.get(
+            empleado=supervisor_objetivo,
+            fecha=festivo_dos,
+        )
+        self.assertFalse(guardia_manual.descanso)
+        self.assertEqual(guardia_manual.inicio.isoformat(), '06:00:00')
+        self.assertEqual(guardia_manual.fin.isoformat(), '18:00:00')
+        self.assertTrue(guardia_manual.remoto)
+        self.assertTrue(guardia_manual.manual)
+        self.assertEqual(
+            Turno.objects.filter(
+                empleado__in=self.supervisores,
+                fecha=festivo_dos,
+                descanso=False,
+                remoto=True,
+            ).count(),
+            1,
+        )
+
+    def test_cambio_manual_de_horario_festivo_conserva_ds_de_doce_horas(self):
+        festivo = date(2026, 11, 2)
+        generar_semana(festivo)
+        guardia = Turno.objects.get(
+            empleado__in=self.supervisores,
+            fecha=festivo,
+            descanso=False,
+        ).empleado
+
+        cambiar_horario(guardia, festivo, time(9, 0))
+
+        turno = Turno.objects.get(empleado=guardia, fecha=festivo)
+        self.assertEqual(turno.inicio, time(6, 0))
+        self.assertEqual(turno.fin, time(18, 0))
+        self.assertTrue(turno.remoto)
+        self.assertTrue(turno.manual)
 
     def test_intercambio_de_patron_conserva_dos_libres_y_persiste_al_regenerar(self):
         admin = User.objects.create_user(
@@ -685,6 +1116,7 @@ class RotacionTecnicosSinFranjaTests(TestCase):
 
     def test_festivo_asigna_un_tecnico_por_franja_y_descansa_el_restante(self):
         festivo = date(2026, 11, 2)
+        lunes_festivo = festivo - timedelta(days=festivo.weekday())
         generar_semana(festivo)
 
         for franja in (
@@ -708,6 +1140,15 @@ class RotacionTecnicosSinFranjaTests(TestCase):
                 trabajando[0].inicio.strftime('%H:%M'), franja.hora_inicio
             )
 
+        for empleado in self.tecnicos + [self.tecnico_fijo]:
+            descansos_semana = Turno.objects.filter(
+                empleado=empleado,
+                fecha__range=(lunes_festivo, lunes_festivo + timedelta(days=6)),
+                descanso=True,
+                novedad='',
+            ).count()
+            self.assertEqual(descansos_semana, 1, empleado.nombre)
+
         asignaciones_antes = {
             franja.id: Turno.objects.get(
                 franja=franja, fecha=festivo, descanso=False
@@ -717,6 +1158,17 @@ class RotacionTecnicosSinFranjaTests(TestCase):
             )
         }
         generar_semana(festivo)
+        for empleado in self.tecnicos + [self.tecnico_fijo]:
+            self.assertEqual(
+                Turno.objects.filter(
+                    empleado=empleado,
+                    fecha__range=(lunes_festivo, lunes_festivo + timedelta(days=6)),
+                    descanso=True,
+                    novedad='',
+                ).count(),
+                1,
+                empleado.nombre,
+            )
         self.assertEqual(
             asignaciones_antes,
             {
@@ -1187,6 +1639,154 @@ class EdicionHorarioManualTests(TestCase):
         self.assertFalse(turno_viernes.descanso)
         self.assertTrue(turno_martes.descanso)
         self.assertEqual(turno_martes.novedad, '')
+
+    def test_agrega_descanso_sin_mover_el_existente_y_persiste(self):
+        self.franja.minimo_personas = 0
+        self.franja.save(update_fields=['minimo_personas'])
+        descanso_original = Turno.objects.get(
+            empleado=self.empleado,
+            fecha__range=(self.lunes, self.lunes + timedelta(days=6)),
+            descanso=True,
+        ).fecha
+        martes = self.lunes + timedelta(days=1)
+
+        respuesta = self.client.post(
+            '/api/turnos/descanso/agregar/',
+            data={
+                'empleado_id': self.empleado.id,
+                'fecha': martes.isoformat(),
+            },
+            content_type='application/json',
+        )
+
+        self.assertEqual(respuesta.status_code, 200, respuesta.content)
+        turno_original = Turno.objects.get(
+            empleado=self.empleado, fecha=descanso_original
+        )
+        turno_martes = Turno.objects.get(
+            empleado=self.empleado, fecha=martes
+        )
+        self.assertTrue(turno_original.descanso)
+        self.assertTrue(turno_martes.descanso)
+        self.assertTrue(turno_martes.manual)
+
+        generar_semana(self.lunes)
+        turno_original.refresh_from_db()
+        turno_martes.refresh_from_db()
+        self.assertTrue(turno_original.descanso)
+        self.assertTrue(turno_martes.descanso)
+
+    def test_agrega_descanso_en_permiso_sin_mover_descanso_existente(self):
+        self.franja.minimo_personas = 0
+        self.franja.save(update_fields=['minimo_personas'])
+        Novedad.objects.create(
+            empleado=self.empleado,
+            tipo='PERMISO',
+            fecha_inicio=self.lunes,
+            fecha_fin=self.lunes + timedelta(days=2),
+            nota='Permiso de tres días',
+        )
+        generar_semana(self.lunes)
+        descanso_original = Turno.objects.get(
+            empleado=self.empleado,
+            fecha__range=(self.lunes, self.lunes + timedelta(days=6)),
+            descanso=True,
+        ).fecha
+        martes = self.lunes + timedelta(days=1)
+
+        respuesta = self.client.post(
+            '/api/turnos/descanso/agregar/',
+            data={
+                'empleado_id': self.empleado.id,
+                'fecha': martes.isoformat(),
+            },
+            content_type='application/json',
+        )
+
+        self.assertEqual(respuesta.status_code, 200, respuesta.content)
+        self.assertTrue(Turno.objects.get(
+            empleado=self.empleado, fecha=descanso_original
+        ).descanso)
+        turno_martes = Turno.objects.get(
+            empleado=self.empleado, fecha=martes
+        )
+        self.assertTrue(turno_martes.descanso)
+        self.assertEqual(turno_martes.novedad, '')
+        self.assertEqual(
+            list(Novedad.objects.filter(
+                empleado=self.empleado, tipo='PERMISO'
+            ).order_by('fecha_inicio').values_list(
+                'fecha_inicio', 'fecha_fin'
+            )),
+            [
+                (self.lunes, self.lunes),
+                (self.lunes + timedelta(days=2), self.lunes + timedelta(days=2)),
+            ],
+        )
+
+        generar_semana(self.lunes)
+        turno_martes.refresh_from_db()
+        self.assertTrue(turno_martes.descanso)
+        self.assertEqual(turno_martes.novedad, '')
+
+    def test_convierte_descanso_en_laboral_sin_crear_otro_descanso(self):
+        descanso_original = Turno.objects.get(
+            empleado=self.empleado,
+            fecha__range=(self.lunes, self.lunes + timedelta(days=6)),
+            descanso=True,
+        ).fecha
+
+        respuesta = self.client.post(
+            '/api/turnos/descanso/trabajar/',
+            data={
+                'empleado_id': self.empleado.id,
+                'fecha': descanso_original.isoformat(),
+            },
+            content_type='application/json',
+        )
+
+        self.assertEqual(respuesta.status_code, 200, respuesta.content)
+        turno = Turno.objects.get(
+            empleado=self.empleado, fecha=descanso_original
+        )
+        self.assertFalse(turno.descanso)
+        self.assertEqual(turno.inicio.strftime('%H:%M'), '06:00')
+        self.assertEqual(turno.fin.strftime('%H:%M'), '13:00')
+        self.assertTrue(turno.manual)
+        self.assertTrue(turno.trabajar_sin_descanso_semanal)
+        self.assertEqual(
+            Turno.objects.filter(
+                empleado=self.empleado,
+                fecha__range=(self.lunes, self.lunes + timedelta(days=6)),
+                descanso=True,
+            ).count(),
+            0,
+        )
+
+        generar_semana(self.lunes)
+        turno.refresh_from_db()
+        self.assertFalse(turno.descanso)
+        self.assertTrue(turno.trabajar_sin_descanso_semanal)
+        self.assertEqual(
+            Turno.objects.filter(
+                empleado=self.empleado,
+                fecha__range=(self.lunes, self.lunes + timedelta(days=6)),
+                descanso=True,
+            ).count(),
+            0,
+        )
+
+        generar_semana(self.lunes, descartar_manuales=True)
+        turno.refresh_from_db()
+        self.assertFalse(turno.trabajar_sin_descanso_semanal)
+        self.assertEqual(
+            Turno.objects.filter(
+                empleado=self.empleado,
+                fecha__range=(self.lunes, self.lunes + timedelta(days=6)),
+                descanso=True,
+            ).count(),
+            1,
+        )
 
     def test_cambia_franja_del_tecnico_toda_la_semana_y_persiste(self):
         self.franja.minimo_personas = 0

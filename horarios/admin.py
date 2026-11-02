@@ -1,5 +1,8 @@
 from django.contrib import admin
-from .models import AsignacionSemanal, Rol, Franja, Empleado, Turno, Novedad
+from .models import (
+    AsignacionActaRetribucion, AsignacionSemanal, Rol, Franja, Empleado,
+    Turno, Novedad,
+)
 
 @admin.register(Novedad)
 class NovedadAdmin(admin.ModelAdmin):
@@ -34,5 +37,12 @@ class TurnoAdmin(admin.ModelAdmin):
 class AsignacionSemanalAdmin(admin.ModelAdmin):
     list_display = ('lunes', 'franja', 'cantidad')
     list_filter = ('lunes', 'franja')
+
+
+@admin.register(AsignacionActaRetribucion)
+class AsignacionActaRetribucionAdmin(admin.ModelAdmin):
+    list_display = ('mes', 'supervisor', 'creada_en')
+    list_filter = ('mes',)
+    search_fields = ('supervisor__nombre',)
 
 # Register your models here.

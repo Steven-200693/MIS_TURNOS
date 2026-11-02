@@ -12,16 +12,36 @@ const NOVEDADES = {
   PERMISO: { texto: 'Permiso', clases: 'bg-violet-200 text-violet-900' },
 };
 
+const COLORES_TURNO = {
+  '06:00': '#fef08a',
+  '09:00': '#fef08a',
+  '12:00': '#fef08a',
+  '13:00': '#bbf7d0',
+  '16:00': '#60a5fa',
+  '23:00': '#111827',
+};
+
 const $tabla = document.getElementById('tabla');
 const $rango = document.getElementById('rango');
 const $info = document.getElementById('info');
 const $avisos = document.getElementById('avisos');
+const $dashboardDescansos = document.getElementById('dashboard-descansos');
+const $dashboardPeriodo = document.getElementById('dashboard-descansos-periodo');
+const $actaMes = document.getElementById('acta-retribucion-mes');
+const $actaAsignado = document.getElementById('acta-retribucion-asignado');
+const $actaControles = document.getElementById('acta-retribucion-controles');
+const $actaSupervisor = document.getElementById('acta-retribucion-supervisor');
+const $actaGuardar = document.getElementById('acta-retribucion-guardar');
+const $actaMensaje = document.getElementById('acta-retribucion-mensaje');
 const $btnGenerar = document.getElementById('btn-generar');
 const $btnDescartar = document.getElementById('btn-descartar');
 const $btnLimpiar = document.getElementById('btn-limpiar');
+const $btnCopiarImagen = document.getElementById('btn-copiar-imagen');
+const $btnExportarExcel = document.getElementById('btn-exportar-excel');
 const $distribucionTecnicos = document.getElementById('distribucion-tecnicos');
 const $distribucionResumen = document.getElementById('distribucion-resumen');
 const $btnGuardarDistribucion = document.getElementById('btn-guardar-distribucion');
+const $leyendaFranjas = document.getElementById('leyenda-franjas');
 
 const ES_ADMIN = document.body.dataset.admin === '1';
 
@@ -98,6 +118,232 @@ function nombreDia(fecha) {
   return DIAS[datosSemana.dias.indexOf(fecha)];
 }
 
+function normalizarRol(rol) {
+  return rol.normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+
+function colorFranja(horaInicio, rol) {
+  if (normalizarRol(rol) === 'supervisor') {
+    if (horaInicio === '09:00') return '#fca5a5';
+    if (horaInicio === '12:00') return '#bbf7d0';
+  }
+  return COLORES_TURNO[horaInicio] || '#f1f5f9';
+}
+
+function empleadosDelHorario() {
+  return datosSemana.empleados
+    .filter(empleado => ['tecnico', 'supervisor'].includes(normalizarRol(empleado.rol)))
+    .map(empleado => ({
+      ...empleado,
+      franjaSemana: empleado.franja || 'Sin franja',
+      turnosSemana: datosSemana.dias.map(fecha => empleado.turnos[fecha] || null),
+    }));
+}
+
+function textoTurno(turno) {
+  if (!turno) return '';
+  if (turno.novedad) return NOVEDADES[turno.novedad]?.texto || turno.novedad;
+  if (turno.descanso) return 'Descanso';
+  if (!turno.inicio || !turno.fin) return '';
+  const cruza = turno.fin < turno.inicio;
+  const remoto = turno.remoto ? ' (DS)' : '';
+  return `${turno.inicio}-${turno.fin}${cruza ? ' (+1)' : ''}${remoto}`;
+}
+
+function blobDelCanvas(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => {
+      if (blob) resolve(blob);
+      else reject(new Error('No se pudo generar la imagen del horario.'));
+    }, 'image/png');
+  });
+}
+
+function dibujarImagenHorario() {
+  const empleados = empleadosDelHorario();
+  const semanaInicio = desdeTexto(datosSemana.dias[0]);
+  const semanaFin = desdeTexto(datosSemana.dias[6]);
+  const escala = 2;
+  const rolAncho = 120;
+  const nombreAncho = 220;
+  const diaAncho = 150;
+  const ancho = rolAncho + nombreAncho + diaAncho * 7;
+  const altoTitulo = 64;
+  const altoCabecera = 54;
+  const altoFila = 48;
+  const canvas = document.createElement('canvas');
+  canvas.width = ancho * escala;
+  canvas.height = (altoTitulo + altoCabecera + altoFila * empleados.length) * escala;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('El navegador no pudo preparar el lienzo de imagen.');
+  ctx.scale(escala, escala);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, ancho, canvas.height / escala);
+
+  ctx.fillStyle = '#0f172a';
+  ctx.font = 'bold 22px Arial, sans-serif';
+  ctx.fillText('Horario semanal', 16, 29);
+  ctx.font = '14px Arial, sans-serif';
+  ctx.fillStyle = '#475569';
+  ctx.fillText(
+    `${semanaInicio.getDate()}/${semanaInicio.getMonth() + 1}/${semanaInicio.getFullYear()} - ${semanaFin.getDate()}/${semanaFin.getMonth() + 1}/${semanaFin.getFullYear()}`,
+    16,
+    51,
+  );
+
+  const yCabecera = altoTitulo;
+  ctx.fillStyle = '#e2e8f0';
+  ctx.fillRect(0, yCabecera, ancho, altoCabecera);
+  ctx.font = 'bold 13px Arial, sans-serif';
+  ctx.fillStyle = '#1e293b';
+  const titulos = [
+    { texto: 'Rol', x: 0, ancho: rolAncho },
+    { texto: 'Empleado', x: rolAncho, ancho: nombreAncho },
+  ];
+  titulos.forEach(item => {
+    ctx.fillText(item.texto, item.x + 10, yCabecera + 31);
+  });
+  datosSemana.dias.forEach((fecha, indice) => {
+    const dia = desdeTexto(fecha);
+    const x = rolAncho + nombreAncho + diaAncho * indice;
+    const festivo = datosSemana.festivos?.find(item => item.fecha === fecha);
+    ctx.fillStyle = festivo ? '#92400e' : '#1e293b';
+    ctx.fillText(
+      `${DIAS[indice]} ${dia.getDate()}/${dia.getMonth() + 1}${festivo ? ' *' : ''}`,
+      x + 8,
+      yCabecera + 31,
+    );
+    if (festivo) {
+      ctx.font = '10px Arial, sans-serif';
+      ctx.fillText(festivo.nombre, x + 8, yCabecera + 45);
+      ctx.font = 'bold 13px Arial, sans-serif';
+    }
+  });
+
+  empleados.forEach((empleado, indiceEmpleado) => {
+    const y = altoTitulo + altoCabecera + altoFila * indiceEmpleado;
+    const colorRol = normalizarRol(empleado.rol) === 'tecnico' ? '#f8fafc' : '#f1f5f9';
+    ctx.fillStyle = colorRol;
+    ctx.fillRect(0, y, ancho, altoFila);
+    ctx.fillStyle = '#334155';
+    ctx.font = '12px Arial, sans-serif';
+    ctx.fillText(empleado.rol, 10, y + 28);
+    ctx.fillStyle = '#0f172a';
+    ctx.font = 'bold 12px Arial, sans-serif';
+    ctx.fillText(empleado.nombre, rolAncho + 10, y + 21, nombreAncho - 16);
+    empleado.turnosSemana.forEach((turno, indiceDia) => {
+      const x = rolAncho + nombreAncho + diaAncho * indiceDia;
+      const fecha = datosSemana.dias[indiceDia];
+      const festivo = datosSemana.festivos?.some(item => item.fecha === fecha);
+      const franja = turno?.franja_id
+        ? datosSemana.franjas.find(item => item.id === turno.franja_id)
+        : null;
+      const horaInicio = franja?.hora_inicio || turno?.inicio;
+      let fondo = '#ffffff';
+      if (turno?.novedad) {
+        fondo = {
+          COMPENSATORIO: '#a7f3d0',
+          INCAPACIDAD: '#fecdd3',
+          VACACIONES: '#bae6fd',
+          PERMISO: '#ddd6fe',
+        }[turno.novedad] || '#e2e8f0';
+      } else if (turno?.descanso) {
+        fondo = '#fde68a';
+      } else if (turno?.inicio) {
+        fondo = colorFranja(
+          franja?.hora_inicio || turno.inicio,
+          franja?.rol || empleado.rol,
+        );
+      } else if (festivo) {
+        fondo = '#fffbeb';
+      }
+      ctx.fillStyle = fondo;
+      ctx.fillRect(x, y, diaAncho, altoFila);
+      ctx.fillStyle = horaInicio === '23:00' && !turno?.novedad && !turno?.descanso
+        ? '#ffffff'
+        : '#0f172a';
+      ctx.font = '12px Arial, sans-serif';
+      const contenido = textoTurno(turno);
+      if (contenido) {
+        ctx.fillText(contenido, x + 8, y + 27, diaAncho - 16);
+      }
+      if (festivo) {
+        ctx.strokeStyle = '#f59e0b';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x + 1, y + 1, diaAncho - 2, altoFila - 2);
+      }
+    });
+
+    ctx.strokeStyle = '#cbd5e1';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, y + altoFila);
+    ctx.lineTo(ancho, y + altoFila);
+    ctx.stroke();
+  });
+  return canvas;
+}
+
+async function copiarImagenHorario() {
+  if (!datosSemana) {
+    mostrarError('Espera a que se cargue el horario antes de copiarlo.');
+    return;
+  }
+  if (!empleadosDelHorario().length) {
+    mostrarError('No hay técnicos ni supervisores para copiar en esta semana.');
+    return;
+  }
+  if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+    mostrarError('Este navegador no permite copiar imágenes. Abre la aplicación en HTTPS o en localhost y prueba con un navegador actualizado.');
+    return;
+  }
+  $btnCopiarImagen.disabled = true;
+  try {
+    const canvas = dibujarImagenHorario();
+    const blob = await blobDelCanvas(canvas);
+    await navigator.clipboard.write([
+      new ClipboardItem({ 'image/png': blob }),
+    ]);
+    mostrarOk('La imagen completa del horario semanal se copió al portapapeles.');
+  } catch (error) {
+    mostrarError(`No se pudo copiar la imagen: ${error.message}`);
+  } finally {
+    $btnCopiarImagen.disabled = false;
+  }
+}
+
+async function exportarExcelHorario() {
+  if (!datosSemana) {
+    mostrarError('Espera a que se cargue el horario antes de exportarlo.');
+    return;
+  }
+  $btnExportarExcel.disabled = true;
+  try {
+    const respuesta = await fetch(
+      `/api/semana/exportar-excel/?fecha=${encodeURIComponent(fechaActual)}`
+    );
+    if (!respuesta.ok) {
+      const error = await respuesta.json().catch(() => ({}));
+      throw new Error(error.error || `El servidor respondió ${respuesta.status}`);
+    }
+    const archivo = await respuesta.blob();
+    const url = URL.createObjectURL(archivo);
+    const enlace = document.createElement('a');
+    enlace.href = url;
+    enlace.download = `horario-semana-${datosSemana.lunes}.xlsx`;
+    document.body.appendChild(enlace);
+    enlace.click();
+    enlace.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    mostrarOk('Se descargó el archivo Excel con el horario de la semana.');
+  } catch (error) {
+    mostrarError(`No se pudo exportar el Excel: ${error.message}`);
+  } finally {
+    $btnExportarExcel.disabled = false;
+  }
+}
+
 function actualizarResumenDistribucion(totalEsperado) {
   if (!$distribucionTecnicos) return;
   const inputs = [...$distribucionTecnicos.querySelectorAll('input[data-franja-id]')];
@@ -146,6 +392,24 @@ function pintarDistribucionTecnicos(distribucion) {
   $btnGuardarDistribucion.disabled = !cuposValidos;
 }
 
+function pintarLeyendaFranjas(franjas) {
+  if (!$leyendaFranjas) return;
+  $leyendaFranjas.replaceChildren();
+  franjas.forEach(franja => {
+    const color = colorFranja(franja.hora_inicio, franja.rol);
+    const item = el('span', 'inline-flex items-center gap-1');
+    const muestra = el('span', 'inline-block w-3 h-3 rounded');
+    muestra.style.backgroundColor = color;
+    item.append(
+      muestra,
+      document.createTextNode(
+        `${franja.rol} · ${franja.nombre} (${franja.hora_inicio})`
+      ),
+    );
+    $leyendaFranjas.appendChild(item);
+  });
+}
+
 
 // =====================================================================
 // BLOQUE C: Mensajes en pantalla
@@ -180,6 +444,207 @@ function mostrarError(texto) {
     'text-red-800 bg-red-100 rounded px-3 py-2 text-sm', texto));
 }
 
+function tablaDescansos(rol, filas, resumen) {
+  const seccion = el('div', 'mb-5 last:mb-0');
+  const promedio = resumen?.promedio_descansos_fin_semana ?? 0;
+  const promedioCompletos = resumen?.promedio_fines_semana_completos ?? 0;
+  const promedioFestivos = resumen?.promedio_festivos_descanso ?? 0;
+  const promedioFestivosTrabajados = resumen?.promedio_festivos_trabajados ?? 0;
+  seccion.appendChild(el(
+    'h3',
+    'font-semibold mb-1',
+    `${rol} · promedio ${promedio} día(s) de descanso en fin de semana, ${promedioCompletos} fin(es) de semana completo(s), ${promedioFestivosTrabajados} festivo(s) trabajado(s) y ${promedioFestivos} festivo(s) descansado(s) por persona`,
+  ));
+  const contenedor = el('div', 'overflow-x-auto');
+  const tabla = el('table', 'min-w-full text-sm border-collapse');
+  const filaTitulo = el('tr', 'bg-slate-100 text-left');
+  [
+    'Empleado',
+    'Descansos totales',
+    'Sábados',
+    'Domingos',
+    'Festivos trabajados',
+    'Festivos descansados',
+    'Días fin de semana',
+    'Fines de semana completos',
+    'Fines de semana registrados',
+  ].forEach(texto => filaTitulo.appendChild(
+    el('th', 'p-2 border-b border-slate-200 whitespace-nowrap', texto)
+  ));
+  const cabeza = el('thead');
+  cabeza.appendChild(filaTitulo);
+  tabla.appendChild(cabeza);
+
+  const cuerpo = el('tbody');
+  filas.forEach(fila => {
+    const tr = el('tr', 'border-b border-slate-100');
+    tr.appendChild(el('td', 'p-2 font-medium', fila.nombre));
+    [
+      fila.total_descansos,
+      fila.sabados_descanso,
+      fila.domingos_descanso,
+    ].forEach(valor => tr.appendChild(
+      el('td', 'p-2 text-center tabular-nums', String(valor))
+    ));
+    const festivos = fila.festivos_descanso || [];
+    const formatearFechas = fechas => fechas.map(fecha =>
+      `${fecha.slice(8, 10)}/${fecha.slice(5, 7)}/${fecha.slice(0, 4)}`
+    ).join(', ');
+    const festivosTrabajados = fila.festivos_trabajados || [];
+    tr.appendChild(el(
+      'td',
+      'p-2 text-center',
+      festivosTrabajados.length
+        ? `${fila.total_festivos_trabajados}: ${formatearFechas(festivosTrabajados)}`
+        : '0',
+    ));
+    tr.appendChild(el(
+      'td',
+      'p-2 text-center',
+      festivos.length
+        ? `${fila.total_festivos_descanso}: ${formatearFechas(festivos)}`
+        : '0',
+    ));
+    [
+      fila.dias_descanso_fin_semana,
+      fila.fines_semana_completos,
+      fila.fines_semana_observados,
+    ].forEach(valor => tr.appendChild(
+      el('td', 'p-2 text-center tabular-nums', String(valor))
+    ));
+    cuerpo.appendChild(tr);
+  });
+  tabla.appendChild(cuerpo);
+  contenedor.appendChild(tabla);
+  seccion.appendChild(contenedor);
+  return seccion;
+}
+
+async function cargarDashboardDescansos() {
+  try {
+    const respuesta = await fetch('/api/dashboard/descansos/', {
+      cache: 'no-store',
+    });
+    const datos = await respuesta.json();
+    if (!respuesta.ok) {
+      throw new Error(datos.error || `El servidor respondió ${respuesta.status}`);
+    }
+    $dashboardDescansos.replaceChildren();
+    if (!datos.fecha_inicio || !datos.fecha_fin) {
+      $dashboardPeriodo.textContent = '';
+      $dashboardDescansos.appendChild(el(
+        'p',
+        'text-sm text-slate-500',
+        'Aún no hay descansos generados para técnicos o supervisores.',
+      ));
+      return;
+    }
+    $dashboardPeriodo.textContent =
+      `Periodo registrado: ${datos.fecha_inicio} a ${datos.fecha_fin}`;
+    const roles = Object.keys(datos.grupos);
+    if (!roles.length) {
+      $dashboardDescansos.appendChild(el(
+        'p',
+        'text-sm text-slate-500',
+        'No hay técnicos ni supervisores activos.',
+      ));
+      return;
+    }
+    roles.forEach(rol => {
+      $dashboardDescansos.appendChild(
+        tablaDescansos(rol, datos.grupos[rol], datos.resumen[rol])
+      );
+    });
+    $dashboardDescansos.appendChild(el(
+      'p',
+      'text-xs text-slate-500 mt-2',
+      'Se muestran las fechas de los festivos trabajados y descansados, sin incluir el motivo del festivo.',
+    ));
+  } catch (error) {
+    $dashboardDescansos.replaceChildren(el(
+      'p',
+      'text-red-700 bg-red-50 rounded p-3 text-sm',
+      `No se pudo cargar el dashboard de descansos: ${error.message}`,
+    ));
+  }
+}
+
+async function cargarAsignacionActa() {
+  const fechaMes = `${fechaActual.slice(0, 7)}-01`;
+  const fechaMesDate = desdeTexto(fechaMes);
+  $actaMes.textContent = new Intl.DateTimeFormat('es-CO', {
+    month: 'long',
+    year: 'numeric',
+  }).format(fechaMesDate);
+  $actaAsignado.textContent = 'Cargando asignación…';
+  $actaMensaje.textContent = '';
+  try {
+    const respuesta = await fetch(
+      `/api/acta-retribucion/?fecha=${fechaMes}`,
+      { cache: 'no-store' },
+    );
+    const tipoContenido = respuesta.headers.get('content-type') || '';
+    if (!tipoContenido.includes('application/json')) {
+      throw new Error(
+        `El servidor respondió ${respuesta.status} con una página HTML. ` +
+        'Verifica que las migraciones de Django estén aplicadas.',
+      );
+    }
+    const datos = await respuesta.json();
+    if (!respuesta.ok) {
+      throw new Error(datos.error || `El servidor respondió ${respuesta.status}`);
+    }
+
+    $actaSupervisor.replaceChildren(...datos.supervisores.map(supervisor => {
+      const opcion = el('option', '', supervisor.nombre);
+      opcion.value = String(supervisor.id);
+      return opcion;
+    }));
+    $actaControles.classList.toggle(
+      'hidden',
+      !ES_ADMIN || datos.supervisores.length === 0,
+    );
+    if (!datos.asignacion) {
+      $actaAsignado.textContent = 'No hay supervisores activos para asignar.';
+      return;
+    }
+    $actaAsignado.textContent =
+      `Responsable asignado: ${datos.asignacion.supervisor}`;
+    $actaSupervisor.value = String(datos.asignacion.supervisor_id);
+  } catch (error) {
+    $actaAsignado.textContent = 'No se pudo cargar la asignación.';
+    $actaMensaje.className = 'text-sm mt-2 text-red-700';
+    $actaMensaje.textContent = error.message;
+  }
+}
+
+$actaGuardar.addEventListener('click', async () => {
+  $actaGuardar.disabled = true;
+  $actaMensaje.className = 'text-sm mt-2';
+  $actaMensaje.textContent = '';
+  try {
+    const fechaMes = `${fechaActual.slice(0, 7)}-01`;
+    const resultado = await enviarJSON('/api/acta-retribucion/reasignar/', {
+      fecha: fechaMes,
+      supervisor_id: Number($actaSupervisor.value),
+    });
+    if (!resultado.ok) {
+      throw new Error(
+        resultado.datos.error || `El servidor respondió ${resultado.estado}`,
+      );
+    }
+    $actaAsignado.textContent =
+      `Responsable asignado: ${resultado.datos.asignacion.supervisor}`;
+    $actaMensaje.className = 'text-sm mt-2 text-green-700';
+    $actaMensaje.textContent = 'Asignación guardada.';
+  } catch (error) {
+    $actaMensaje.className = 'text-sm mt-2 text-red-700';
+    $actaMensaje.textContent = error.message;
+  } finally {
+    $actaGuardar.disabled = false;
+  }
+});
+
 
 // =====================================================================
 // BLOQUE D: Dibujar la tabla
@@ -188,11 +653,28 @@ function celdaTurno(turno, esHoy, emp, dia) {
   const festivo = datosSemana?.festivos?.find(item => item.fecha === dia);
   let clases = 'p-2 text-center border-l border-slate-100';
   if (festivo) clases += ' bg-amber-50';
-  if (esHoy) clases += ' bg-indigo-100';
+  if (esHoy) clases += ' ring-2 ring-inset ring-indigo-400';
   const tieneHorario = turno && turno.inicio && turno.fin;
   const editable = ES_ADMIN && turno && !turno.novedad && (turno.descanso || tieneHorario);
-  if (editable) clases += ' cursor-pointer hover:bg-slate-100';
+  if (editable) clases += ' cursor-pointer';
   const td = el('td', clases);
+  if (tieneHorario && !turno.novedad && !turno.descanso) {
+    const franja = datosSemana.franjas.find(
+      item => item.id === turno.franja_id
+    );
+    const color = colorFranja(
+      franja?.hora_inicio || turno.inicio,
+      franja?.rol || emp.rol,
+    );
+    const horaInicio = franja?.hora_inicio || turno.inicio;
+    td.style.backgroundColor = color || '#f1f5f9';
+    const turnoOscuro = horaInicio === '23:00';
+    if (turnoOscuro) td.style.color = '#ffffff';
+    td.title = franja
+      ? `${franja.rol} · ${franja.nombre} (${franja.hora_inicio})`
+      : `Turno ${turno.inicio}–${turno.fin}`;
+    if (festivo) td.classList.add('border-t-2', 'border-t-amber-500');
+  }
 
   if (!turno) {
     td.appendChild(el('span', 'text-slate-300', '—'));
@@ -209,9 +691,21 @@ function celdaTurno(turno, esHoy, emp, dia) {
   } else {
     const cruza = turno.fin < turno.inicio;   // ej. 23:00 -> 06:00
     td.appendChild(el('div', 'font-semibold', turno.inicio));
-    td.appendChild(el('div', 'text-xs text-slate-500', turno.fin + (cruza ? ' (+1)' : '')));
+    const horaInicio = datosSemana.franjas.find(
+      item => item.id === turno.franja_id
+    )?.hora_inicio || turno.inicio;
+    const clasesHoraFin = horaInicio === '23:00'
+      ? 'text-xs text-white'
+      : 'text-xs text-slate-500';
+    td.appendChild(el('div', clasesHoraFin, turno.fin + (cruza ? ' (+1)' : '')));
     if (turno.remoto) {
-      td.appendChild(el('div', 'text-xs font-semibold text-sky-700', 'DS'));
+      td.appendChild(el(
+        'div',
+        horaInicio === '23:00'
+          ? 'text-xs font-semibold text-white'
+          : 'text-xs font-semibold text-sky-700',
+        'DS',
+      ));
     }
   }
 
@@ -227,6 +721,7 @@ function celdaTurno(turno, esHoy, emp, dia) {
 function pintar(datos) {
   datosSemana = datos;
   pintarDistribucionTecnicos(datos.distribucion_tecnicos);
+  pintarLeyendaFranjas(datos.franjas || []);
   const hoy = aTexto(new Date());
 
   // Rango de fechas arriba de la tabla
@@ -352,11 +847,14 @@ function irA(texto) {
   fechaActual = texto;
   limpiarAvisos();
   cargar();
+  cargarAsignacionActa();
 }
 
 document.getElementById('btn-anterior').addEventListener('click', () => irA(sumarDias(fechaActual, -7)));
 document.getElementById('btn-siguiente').addEventListener('click', () => irA(sumarDias(fechaActual, 7)));
 document.getElementById('btn-hoy').addEventListener('click', () => irA(aTexto(new Date())));
+$btnCopiarImagen.addEventListener('click', copiarImagenHorario);
+$btnExportarExcel.addEventListener('click', exportarExcelHorario);
 
 if ($btnGuardarDistribucion) {
   $btnGuardarDistribucion.addEventListener('click', async () => {
@@ -415,6 +913,7 @@ async function generar(descartar = false) {
         `Se respetaron los ajustes manuales de ${datos.manuales} persona(s) (marcados con ✎).`));
     }
     await cargar();
+    await cargarDashboardDescansos();
   } catch (error) {
     mostrarError('No se pudieron generar los turnos: ' + error.message);
   } finally {
@@ -457,6 +956,7 @@ $btnLimpiar.addEventListener('click', async () => {
 
     mostrarOk(`Se limpiaron ${datos.limpiados} casilla(s). Ya puedes generar los turnos de nuevo.`);
     await cargar();
+    await cargarDashboardDescansos();
   } catch (error) {
     mostrarError('No se pudieron limpiar los turnos: ' + error.message);
   } finally {
@@ -477,6 +977,8 @@ const $dtMoverTexto = document.getElementById('dt-mover-texto');
 const $dtMoverDestinoLabel = document.getElementById('dt-mover-destino-label');
 const $dtMoverDestino = document.getElementById('dt-mover-destino');
 const $dtMoverBtn = document.getElementById('dt-mover-btn');
+const $dtAgregarDescansoBtn = document.getElementById('dt-agregar-descanso-btn');
+const $dtDescansoTrabajarBtn = document.getElementById('dt-descanso-trabajar-btn');
 const $dtCambio = document.getElementById('dt-cambio');
 const $dtCompanero = document.getElementById('dt-companero');
 const $dtCambioBtn = document.getElementById('dt-cambio-btn');
@@ -534,9 +1036,32 @@ function abrirEdicion(emp, dia) {
     !usaIntercambioFinSemana
     && actual !== null
     && (!turno.descanso || diasAlternativos.length > 0);
-  $dtMover.classList.toggle('hidden', !puedeMover);
+  const puedeAgregarDescanso =
+    !usaIntercambioFinSemana
+    && !turno.descanso
+    && (!turno.novedad || turno.novedad === 'PERMISO');
+  const puedeConvertirDescanso =
+    !usaIntercambioFinSemana
+    && Boolean(turno.descanso)
+    && !turno.novedad;
+  $dtMover.classList.toggle(
+    'hidden',
+    !puedeMover && !puedeAgregarDescanso && !puedeConvertirDescanso
+  );
+  $dtMoverBtn.classList.toggle('hidden', !puedeMover);
+  $dtAgregarDescansoBtn.classList.toggle(
+    'hidden',
+    !puedeAgregarDescanso
+  );
+  $dtDescansoTrabajarBtn.classList.toggle(
+    'hidden',
+    !puedeConvertirDescanso
+  );
   $dtMoverDestinoLabel.classList.toggle('hidden', !puedeMover || !descansoEnCasilla);
   $dtMoverDestino.classList.toggle('hidden', !puedeMover || !descansoEnCasilla);
+  $dtAgregarDescansoBtn.textContent = turno.novedad === 'PERMISO'
+    ? 'Reemplazar permiso por descanso adicional'
+    : 'Agregar descanso sin mover el actual';
   if (puedeMover) {
     if (descansoEnCasilla) {
       $dtMoverTexto.textContent =
@@ -641,7 +1166,8 @@ function abrirEdicion(emp, dia) {
   );
 
   if (
-    !puedeMover && !hayCompaneros && !puedeEditarHorario
+    !puedeMover && !puedeAgregarDescanso && !puedeConvertirDescanso
+    && !hayCompaneros && !puedeEditarHorario
     && !(usaIntercambioFinSemana && supervisores.length > 0)
     && !(esTecnico && franjasTecnico.length > 1)
   ) {
@@ -663,6 +1189,7 @@ async function ejecutarCambio(url, cuerpo) {
   if (r.ok) {
     $dlg.close();
     await cargar();
+    await cargarDashboardDescansos();
     mostrarOk('Cambio aplicado. Quedó marcado con ✎ y el generador lo respetará.');
     return;
   }
@@ -681,6 +1208,20 @@ $dtMoverBtn.addEventListener('click', () => {
     fecha: contexto.emp.turnos[contexto.dia].descanso
       ? $dtMoverDestino.value
       : contexto.dia,
+  });
+});
+
+$dtAgregarDescansoBtn.addEventListener('click', () => {
+  ejecutarCambio('/api/turnos/descanso/agregar/', {
+    empleado_id: contexto.emp.id,
+    fecha: contexto.dia,
+  });
+});
+
+$dtDescansoTrabajarBtn.addEventListener('click', () => {
+  ejecutarCambio('/api/turnos/descanso/trabajar/', {
+    empleado_id: contexto.emp.id,
+    fecha: contexto.dia,
   });
 });
 
@@ -728,3 +1269,5 @@ document.getElementById('dt-cerrar').addEventListener('click', () => $dlg.close(
 // ARRANQUE
 // =====================================================================
 cargar();
+cargarDashboardDescansos();
+cargarAsignacionActa();

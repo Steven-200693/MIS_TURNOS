@@ -74,6 +74,7 @@ class Turno(models.Model):
     remoto = models.BooleanField(default=False)
     manual = models.BooleanField(default=False)   # ← NUEVA
     novedad = models.CharField(max_length=15, blank=True, default='')   # ← NUEVA
+    trabajar_sin_descanso_semanal = models.BooleanField(default=False)
 
     class Meta:
         unique_together = ('empleado', 'fecha')
@@ -94,6 +95,30 @@ class AsignacionSemanal(models.Model):
 
     def __str__(self):
         return f"{self.lunes} · {self.franja} · {self.cantidad} técnicos"
+
+
+class AsignacionActaRetribucion(models.Model):
+    mes = models.DateField(unique=True)
+    supervisor = models.ForeignKey(
+        Empleado,
+        on_delete=models.PROTECT,
+        related_name='actas_retribucion',
+    )
+    creada_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-mes']
+        verbose_name = 'asignación de acta de retribución'
+        verbose_name_plural = 'asignaciones de actas de retribución'
+
+    def clean(self):
+        if self.supervisor_id and self.supervisor.rol.nombre.casefold() != 'supervisor':
+            raise ValidationError(
+                'La persona asignada al acta debe tener el rol Supervisor.'
+            )
+
+    def __str__(self):
+        return f'{self.mes:%Y-%m} · {self.supervisor.nombre}'
 
 
 class Novedad(models.Model):

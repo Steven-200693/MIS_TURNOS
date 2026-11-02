@@ -9,6 +9,26 @@ urlpatterns = [
     # Página y datos de la semana
     path('', views.index, name='index'),
     path('api/semana/', views.api_semana, name='api_semana'),
+    path(
+        'api/dashboard/descansos/',
+        views.api_dashboard_descansos,
+        name='api_dashboard_descansos',
+    ),
+    path(
+        'api/acta-retribucion/',
+        views.api_acta_retribucion,
+        name='api_acta_retribucion',
+    ),
+    path(
+        'api/acta-retribucion/reasignar/',
+        views.api_acta_retribucion_reasignar,
+        name='api_acta_retribucion_reasignar',
+    ),
+    path(
+        'api/semana/exportar-excel/',
+        views.api_exportar_semana_excel,
+        name='api_exportar_semana_excel',
+    ),
     path('api/generar/', views.api_generar, name='api_generar'),
     path(
         'api/tecnicos/distribucion/',
@@ -27,6 +47,16 @@ urlpatterns = [
 
     # Edición manual de turnos
     path('api/turnos/descanso/', views.api_turno_descanso, name='api_turno_descanso'),
+    path(
+        'api/turnos/descanso/agregar/',
+        views.api_turno_descanso_agregar,
+        name='api_turno_descanso_agregar',
+    ),
+    path(
+        'api/turnos/descanso/trabajar/',
+        views.api_turno_descanso_trabajar,
+        name='api_turno_descanso_trabajar',
+    ),
     path('api/turnos/intercambiar/', views.api_turno_intercambiar, name='api_turno_intercambiar'),
     path(
         'api/supervisores/fin-de-semana/intercambiar/',

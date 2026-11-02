@@ -140,9 +140,101 @@ def _dias_especiales_previos(empleados, fecha):
     return conteos
 
 
+def _festivos_trabajados_previos(empleados, fecha):
+    conteos = defaultdict(int)
+    if not empleados:
+        return conteos
+    fechas_festivas = [
+        festivo for festivo in FESTIVOS_COLOMBIA_2026
+        if festivo < fecha
+    ]
+    turnos = Turno.objects.filter(
+        empleado_id__in=[empleado.id for empleado in empleados],
+        fecha__in=fechas_festivas,
+        descanso=False,
+        novedad='',
+        inicio__isnull=False,
+    ).values_list('empleado_id', flat=True)
+    for empleado_id in turnos:
+        conteos[empleado_id] += 1
+    return conteos
+
+
+def _es_supervisor(empleado):
+    return empleado.rol.nombre.strip().casefold() == 'supervisor'
+
+
+def _asignar_guardia_festiva_supervisores(fecha, preferido=None, excluir=()):
+    supervisores = list(
+        Empleado.objects.filter(
+            activo=True,
+            rol__nombre__iexact='Supervisor',
+        ).select_related('rol', 'franja').order_by('id')
+    )
+    turnos = {
+        turno.empleado_id: turno
+        for turno in Turno.objects.filter(
+            empleado__in=supervisores,
+            fecha=fecha,
+        ).select_related('franja')
+    }
+    excluidos = set(excluir)
+    elegibles = [
+        empleado for empleado in supervisores
+        if (not empleado.fecha_ingreso or empleado.fecha_ingreso <= fecha)
+        and empleado.id not in excluidos
+        and empleado.id in turnos
+        and not turnos[empleado.id].novedad
+    ]
+    if preferido is not None:
+        elegibles = [
+            empleado for empleado in elegibles
+            if empleado.id == preferido.id
+        ]
+    if not elegibles:
+        raise CambioInvalido(
+            f"No hay supervisores disponibles para cubrir el festivo "
+            f"{fecha.isoformat()}."
+        )
+
+    conteos = _festivos_trabajados_previos(supervisores, fecha)
+    elegibles.sort(key=lambda empleado: (
+        conteos[empleado.id],
+        (empleado.id - fecha.toordinal()) % len(supervisores),
+        empleado.id,
+    ))
+    seleccionado = elegibles[0]
+    for empleado in supervisores:
+        turno = turnos.get(empleado.id)
+        if turno is None or turno.novedad:
+            continue
+        if empleado.id == seleccionado.id:
+            franja = turno.franja or empleado.franja or Franja.objects.filter(
+                rol__nombre__iexact='Supervisor'
+            ).order_by('hora_inicio', 'id').first()
+            if franja is None:
+                raise CambioInvalido(
+                    'No hay una franja configurada para los supervisores.'
+                )
+            turno.franja = franja
+            turno.descanso = False
+            turno.inicio = time(6)
+            turno.fin = time(18)
+            turno.remoto = True
+        else:
+            turno.descanso = True
+            turno.inicio = None
+            turno.fin = None
+            turno.remoto = False
+        turno.manual = True
+        turno.save(update_fields=[
+            'franja', 'descanso', 'inicio', 'fin', 'remoto', 'manual',
+        ])
+
+
 def _asignar_guardia_festiva(
     franja, empleados, fecha, bloqueos, avisos, supervisor=False,
-    descartar_manuales=False,
+    descartar_manuales=False, festivo_cuenta_como_descanso=False,
 ):
     """Deja un solo trabajador por franja en festivo y reparte la carga."""
     indice = fecha.weekday()
@@ -159,7 +251,7 @@ def _asignar_guardia_festiva(
             )
     elegibles = [
         empleado for empleado in empleados
-        if not empleado.fecha_ingreso or empleado.fecha_ingreso <= fecha
+        if (not empleado.fecha_ingreso or empleado.fecha_ingreso <= fecha)
         and indice not in bloqueos.get(empleado.id, {})
     ]
     existentes = {
@@ -196,7 +288,11 @@ def _asignar_guardia_festiva(
         )
         return
 
-    conteos = _dias_especiales_previos(empleados, fecha)
+    conteos = (
+        _festivos_trabajados_previos(empleados, fecha)
+        if supervisor
+        else _dias_especiales_previos(empleados, fecha)
+    )
     candidatos = manuales_trabajando or disponibles
     candidatos.sort(key=lambda empleado: (
         conteos[empleado.id],
@@ -240,6 +336,98 @@ def _asignar_guardia_festiva(
         Turno.objects.update_or_create(
             empleado=empleado, fecha=fecha, defaults=datos
         )
+        if (
+            festivo_cuenta_como_descanso
+            and empleado.id != seleccionado.id
+        ):
+            descanso_semanal = Turno.objects.filter(
+                empleado=empleado,
+                fecha__range=(lunes_de(fecha), lunes_de(fecha) + timedelta(days=6)),
+                descanso=True,
+                manual=False,
+                novedad='',
+            ).exclude(
+                fecha__in=[
+                    festivo for festivo in FESTIVOS_COLOMBIA_2026
+                    if lunes_de(fecha) <= festivo <= lunes_de(fecha) + timedelta(days=6)
+                ]
+            ).order_by('fecha').first()
+            if descanso_semanal:
+                franja_descanso = (
+                    descanso_semanal.franja or empleado.franja or franja
+                )
+                descanso_semanal.descanso = False
+                descanso_semanal.inicio = franja_descanso.hora_inicio
+                descanso_semanal.fin = (
+                    datetime.combine(descanso_semanal.fecha, franja_descanso.hora_inicio)
+                    + timedelta(hours=franja_descanso.rol.horas_por_dia)
+                ).time()
+                descanso_semanal.save(
+                    update_fields=['descanso', 'inicio', 'fin']
+                )
+
+    if festivo_cuenta_como_descanso:
+        inicio_semana = lunes_de(fecha)
+        fin_semana = inicio_semana + timedelta(days=6)
+        festivos_semana = [
+            festivo for festivo in FESTIVOS_COLOMBIA_2026
+            if inicio_semana <= festivo <= fin_semana
+        ]
+        descanso_regular = Turno.objects.filter(
+            empleado=seleccionado,
+            fecha__range=(inicio_semana, fin_semana),
+            descanso=True,
+            novedad='',
+        ).exclude(fecha__in=festivos_semana).exists()
+        if not descanso_regular:
+            alternativas = list(
+                Turno.objects.filter(
+                    empleado=seleccionado,
+                    fecha__range=(inicio_semana, fin_semana),
+                    descanso=False,
+                    novedad='',
+                    manual=False,
+                    inicio__isnull=False,
+                ).exclude(fecha__in=festivos_semana).order_by('fecha')
+            )
+            cobertura = []
+            for alternativa in alternativas:
+                personas_trabajando = Turno.objects.filter(
+                    franja_id=alternativa.franja_id,
+                    fecha=alternativa.fecha,
+                    descanso=False,
+                    novedad='',
+                    inicio__isnull=False,
+                    empleado__activo=True,
+                ).count()
+                cobertura.append((personas_trabajando, alternativa))
+            con_cobertura = [
+                (personas, alternativa)
+                for personas, alternativa in cobertura
+                if personas > alternativa.franja.minimo_personas
+            ]
+            opciones = con_cobertura or cobertura
+            if opciones:
+                _, descanso_regular = max(
+                    opciones,
+                    key=lambda item: (
+                        item[0] - item[1].franja.minimo_personas,
+                        -item[1].fecha.toordinal(),
+                    ),
+                )
+                if not con_cobertura:
+                    avisos.append(
+                        f"{seleccionado.nombre}: el descanso compensatorio por "
+                        f"el festivo {fecha.isoformat()} reduce la cobertura de "
+                        f"{descanso_regular.franja.nombre} el "
+                        f"{descanso_regular.fecha.isoformat()}."
+                    )
+                descanso_regular.descanso = True
+                descanso_regular.inicio = None
+                descanso_regular.fin = None
+                descanso_regular.save(
+                    update_fields=['descanso', 'inicio', 'fin']
+                )
 
 
 def _asignaciones_fin_de_semana(lunes):
@@ -389,6 +577,10 @@ def generar_semana(fecha, descartar_manuales=False):
 
     if descartar_manuales:
         Turno.objects.filter(fecha__in=dias, manual=True).update(manual=False)
+        Turno.objects.filter(
+            fecha__in=dias,
+            trabajar_sin_descanso_semanal=True,
+        ).update(trabajar_sin_descanso_semanal=False)
 
     # Descansos fijados a mano: empleado_id -> índice del día (0 = lunes)
     fijos = {
@@ -399,6 +591,12 @@ def generar_semana(fecha, descartar_manuales=False):
         (t.empleado_id, (t.fecha - lunes).days): t
         for t in Turno.objects.filter(fecha__in=dias, manual=True)
     }
+    trabajar_sin_descanso = set(
+        Turno.objects.filter(
+            fecha__in=dias,
+            trabajar_sin_descanso_semanal=True,
+        ).values_list('empleado_id', flat=True)
+    )
 
     for franja in Franja.objects.select_related('rol'):
         etiqueta = f"{franja.rol.nombre} · {franja.nombre}"
@@ -459,11 +657,11 @@ def generar_semana(fecha, descartar_manuales=False):
                 dia for (empleado_id, dia) in turnos_manuales
                 if empleado_id == emp.id and dia >= primer_dia and dia not in bloq
             }
-            candidatos = [
+            candidatos = [] if emp.id in trabajar_sin_descanso else [
                 d for d in preferidos
                 if d >= primer_dia and d not in bloq and d not in manuales_emp
             ]
-            if not candidatos:
+            if not candidatos and emp.id not in trabajar_sin_descanso:
                 candidatos = [
                     d for d in range(primer_dia, 7)
                     if d not in bloq and d not in manuales_emp
@@ -624,6 +822,7 @@ def generar_semana(fecha, descartar_manuales=False):
                         bloqueos,
                         avisos,
                         descartar_manuales=descartar_manuales,
+                        festivo_cuenta_como_descanso=True,
                     )
         # 4) Revisar la cobertura de la franja, día por día
         for d in range(7):
@@ -910,25 +1109,149 @@ def cambiar_descansos(cambios, forzar=False):
         if problemas:
             raise CoberturaInsuficiente(problemas)
 
+    preferencias_festivas = {}
+    supervisores_a_excluir = defaultdict(set)
     for emp, viejo, nuevo, franja, reemplazar_permiso in preparados:
         if reemplazar_permiso:
             _reemplazar_permiso_por_descanso(emp, nuevo.fecha)
-        entrada = datetime.combine(viejo.fecha, franja.hora_inicio)
-        salida = entrada + timedelta(hours=franja.rol.horas_por_dia)
+        es_guardia_festiva = (
+            _es_supervisor(emp) and viejo.fecha in FESTIVOS_COLOMBIA_2026
+        )
+        entrada = datetime.combine(
+            viejo.fecha,
+            time(6) if es_guardia_festiva else franja.hora_inicio,
+        )
+        salida = entrada + timedelta(
+            hours=12 if es_guardia_festiva else franja.rol.horas_por_dia
+        )
 
         viejo.descanso, viejo.inicio, viejo.fin = False, entrada.time(), salida.time()
+        viejo.remoto = es_guardia_festiva
         viejo.manual = True
-        viejo.save()
+        viejo.save(update_fields=[
+            'descanso', 'inicio', 'fin', 'remoto', 'manual',
+        ])
 
         nuevo.descanso, nuevo.inicio, nuevo.fin = True, None, None
+        nuevo.remoto = False
         if reemplazar_permiso:
             nuevo.novedad = ''
         nuevo.manual = True
-        nuevo.save()
+        nuevo.save(update_fields=[
+            'descanso', 'inicio', 'fin', 'remoto', 'novedad', 'manual',
+        ])
+        if viejo.fecha in FESTIVOS_COLOMBIA_2026 and _es_supervisor(emp):
+            preferencias_festivas[viejo.fecha] = emp
+        if nuevo.fecha in FESTIVOS_COLOMBIA_2026 and _es_supervisor(emp):
+            supervisores_a_excluir[nuevo.fecha].add(emp.id)
 
     # Si algo no cuadra, el @transaction.atomic deshace todo
     for emp, viejo, nuevo, franja, _ in preparados:
         _verificar_horas(emp, viejo.fecha)
+    for fecha_festiva in (
+        set(preferencias_festivas) | set(supervisores_a_excluir)
+    ):
+        preferido = preferencias_festivas.get(fecha_festiva)
+        excluidos = supervisores_a_excluir[fecha_festiva]
+        if preferido and preferido.id in excluidos:
+            preferido = None
+        _asignar_guardia_festiva_supervisores(
+            fecha_festiva,
+            preferido=preferido,
+            excluir=excluidos,
+        )
+
+
+@transaction.atomic
+def agregar_descanso(empleado, fecha, forzar=False):
+    """Marca otro día como descanso y conserva los descansos ya existentes."""
+    dias = _dias_de_semana(fecha)
+    turnos = {
+        turno.fecha: turno
+        for turno in Turno.objects.select_related('franja__rol').filter(
+            empleado=empleado, fecha__in=dias
+        )
+    }
+    if len(turnos) < 7:
+        raise CambioInvalido(
+            f"{empleado.nombre} no tiene turnos generados en esa semana. "
+            "Genera la semana primero."
+        )
+    turno = turnos[fecha]
+    if turno.descanso:
+        raise CambioInvalido(f"{empleado.nombre} ya descansa ese día.")
+    reemplazar_permiso = turno.novedad == 'PERMISO'
+    if turno.novedad and not reemplazar_permiso:
+        tipo = dict(Novedad.TIPOS).get(turno.novedad, turno.novedad)
+        raise CambioInvalido(
+            f"{empleado.nombre} tiene una novedad ese día ({tipo})."
+        )
+    franja = turno.franja or empleado.franja
+    if franja is None:
+        raise CambioInvalido(f"{empleado.nombre} no tiene franja asignada.")
+
+    if not reemplazar_permiso and not forzar:
+        problemas = _revisar_cobertura({(franja.id, fecha): -1})
+        if problemas:
+            raise CoberturaInsuficiente(problemas)
+    if reemplazar_permiso:
+        _reemplazar_permiso_por_descanso(empleado, fecha)
+
+    turno.descanso = True
+    turno.inicio = None
+    turno.fin = None
+    turno.remoto = False
+    turno.novedad = ''
+    turno.trabajar_sin_descanso_semanal = False
+    turno.manual = True
+    turno.save(update_fields=[
+        'descanso', 'inicio', 'fin', 'remoto', 'novedad', 'manual',
+        'trabajar_sin_descanso_semanal',
+    ])
+    if _es_supervisor(empleado) and fecha in FESTIVOS_COLOMBIA_2026:
+        _asignar_guardia_festiva_supervisores(
+            fecha,
+            excluir=(empleado.id,),
+        )
+
+
+@transaction.atomic
+def convertir_descanso_en_trabajo(empleado, fecha):
+    """Convierte el descanso a trabajo sin asignar otro descanso esa semana."""
+    turno = Turno.objects.select_related('franja__rol').filter(
+        empleado=empleado, fecha=fecha
+    ).first()
+    if turno is None:
+        raise CambioInvalido(
+            f"{empleado.nombre} no tiene turno generado para esa fecha."
+        )
+    if not turno.descanso or turno.novedad:
+        raise CambioInvalido(
+            "Solo se puede convertir en trabajo un día marcado como descanso."
+        )
+    franja = turno.franja or empleado.franja
+    if franja is None:
+        raise CambioInvalido(f"{empleado.nombre} no tiene franja asignada.")
+
+    es_guardia_festiva = (
+        _es_supervisor(empleado) and fecha in FESTIVOS_COLOMBIA_2026
+    )
+    inicio = time(6) if es_guardia_festiva else franja.hora_inicio
+    duracion = 12 if es_guardia_festiva else franja.rol.horas_por_dia
+    turno.descanso = False
+    turno.inicio = inicio
+    turno.fin = (
+        datetime.combine(fecha, inicio) + timedelta(hours=duracion)
+    ).time()
+    turno.remoto = es_guardia_festiva
+    turno.manual = True
+    turno.trabajar_sin_descanso_semanal = True
+    turno.save(update_fields=[
+        'descanso', 'inicio', 'fin', 'remoto', 'manual',
+        'trabajar_sin_descanso_semanal',
+    ])
+    if es_guardia_festiva:
+        _asignar_guardia_festiva_supervisores(fecha, preferido=empleado)
 
 
 @transaction.atomic
@@ -950,6 +1273,14 @@ def cambiar_horario(empleado, fecha, inicio):
         raise CambioInvalido(
             "Solo se puede cambiar la hora de un turno de trabajo."
         )
+
+    if _es_supervisor(empleado) and fecha in FESTIVOS_COLOMBIA_2026:
+        turno.inicio = time(6)
+        turno.fin = time(18)
+        turno.remoto = True
+        turno.manual = True
+        turno.save(update_fields=['inicio', 'fin', 'remoto', 'manual'])
+        return
 
     entrada_original = datetime.combine(fecha, turno.inicio)
     salida_original = datetime.combine(fecha, turno.fin)
