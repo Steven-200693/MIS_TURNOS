@@ -48,6 +48,8 @@ const ES_ADMIN = document.body.dataset.admin === '1';
 // Fecha que se está mostrando, como texto 'AAAA-MM-DD'
 let fechaActual = aTexto(new Date());
 let datosSemana = null;   // última respuesta de /api/semana/
+let asignacionActa = null;
+let mesAsignacionActa = null;
 
 
 // =====================================================================
@@ -169,7 +171,7 @@ function dibujarImagenHorario() {
   const nombreAncho = 220;
   const diaAncho = 150;
   const ancho = rolAncho + nombreAncho + diaAncho * 7;
-  const altoTitulo = 64;
+  const altoTitulo = 84;
   const altoCabecera = 54;
   const altoFila = 48;
   const canvas = document.createElement('canvas');
@@ -190,6 +192,17 @@ function dibujarImagenHorario() {
     `${semanaInicio.getDate()}/${semanaInicio.getMonth() + 1}/${semanaInicio.getFullYear()} - ${semanaFin.getDate()}/${semanaFin.getMonth() + 1}/${semanaFin.getFullYear()}`,
     16,
     51,
+  );
+  const mesActa = new Intl.DateTimeFormat('es-CO', {
+    month: 'long',
+    year: 'numeric',
+  }).format(desdeTexto(`${fechaActual.slice(0, 7)}-01`));
+  ctx.font = '12px Arial, sans-serif';
+  ctx.fillText(
+    `Responsable del acta de retribución (${mesActa}): ${asignacionActa?.supervisor || 'Sin asignar'}`,
+    16,
+    73,
+    ancho - 32,
   );
 
   const yCabecera = altoTitulo;
@@ -239,7 +252,7 @@ function dibujarImagenHorario() {
       const franja = turno?.franja_id
         ? datosSemana.franjas.find(item => item.id === turno.franja_id)
         : null;
-      const horaInicio = franja?.hora_inicio || turno?.inicio;
+      const horaInicio = turno?.inicio || franja?.hora_inicio;
       let fondo = '#ffffff';
       if (turno?.novedad) {
         fondo = {
@@ -249,11 +262,11 @@ function dibujarImagenHorario() {
           PERMISO: '#ddd6fe',
         }[turno.novedad] || '#e2e8f0';
       } else if (turno?.descanso) {
-        fondo = '#fde68a';
+        fondo = '#ffffff';
       } else if (turno?.inicio) {
         fondo = colorFranja(
-          franja?.hora_inicio || turno.inicio,
-          franja?.rol || empleado.rol,
+          turno.inicio,
+          empleado.rol,
         );
       } else if (festivo) {
         fondo = '#fffbeb';
@@ -300,6 +313,13 @@ async function copiarImagenHorario() {
   }
   $btnCopiarImagen.disabled = true;
   try {
+    const mesActual = fechaActual.slice(0, 7);
+    if (
+      !(await cargarAsignacionActa())
+      || mesAsignacionActa !== mesActual
+    ) {
+      throw new Error('No se pudo cargar la asignación del acta de este mes.');
+    }
     const canvas = dibujarImagenHorario();
     const blob = await blobDelCanvas(canvas);
     await navigator.clipboard.write([
@@ -571,6 +591,7 @@ async function cargarDashboardDescansos() {
 
 async function cargarAsignacionActa() {
   const fechaMes = `${fechaActual.slice(0, 7)}-01`;
+  const mes = fechaMes.slice(0, 7);
   const fechaMesDate = desdeTexto(fechaMes);
   $actaMes.textContent = new Intl.DateTimeFormat('es-CO', {
     month: 'long',
@@ -606,15 +627,25 @@ async function cargarAsignacionActa() {
     );
     if (!datos.asignacion) {
       $actaAsignado.textContent = 'No hay supervisores activos para asignar.';
-      return;
+      if (fechaActual.slice(0, 7) === mes) {
+        asignacionActa = null;
+        mesAsignacionActa = mes;
+      }
+      return true;
+    }
+    if (fechaActual.slice(0, 7) === mes) {
+      asignacionActa = datos.asignacion;
+      mesAsignacionActa = mes;
     }
     $actaAsignado.textContent =
       `Responsable asignado: ${datos.asignacion.supervisor}`;
     $actaSupervisor.value = String(datos.asignacion.supervisor_id);
+    return true;
   } catch (error) {
     $actaAsignado.textContent = 'No se pudo cargar la asignación.';
     $actaMensaje.className = 'text-sm mt-2 text-red-700';
     $actaMensaje.textContent = error.message;
+    return false;
   }
 }
 
@@ -635,6 +666,8 @@ $actaGuardar.addEventListener('click', async () => {
     }
     $actaAsignado.textContent =
       `Responsable asignado: ${resultado.datos.asignacion.supervisor}`;
+    asignacionActa = resultado.datos.asignacion;
+    mesAsignacionActa = fechaMes.slice(0, 7);
     $actaMensaje.className = 'text-sm mt-2 text-green-700';
     $actaMensaje.textContent = 'Asignación guardada.';
   } catch (error) {
@@ -662,16 +695,13 @@ function celdaTurno(turno, esHoy, emp, dia) {
     const franja = datosSemana.franjas.find(
       item => item.id === turno.franja_id
     );
-    const color = colorFranja(
-      franja?.hora_inicio || turno.inicio,
-      franja?.rol || emp.rol,
-    );
-    const horaInicio = franja?.hora_inicio || turno.inicio;
+    const color = colorFranja(turno.inicio, emp.rol);
+    const horaInicio = turno.inicio;
     td.style.backgroundColor = color || '#f1f5f9';
     const turnoOscuro = horaInicio === '23:00';
     if (turnoOscuro) td.style.color = '#ffffff';
     td.title = franja
-      ? `${franja.rol} · ${franja.nombre} (${franja.hora_inicio})`
+      ? `${franja.rol} · ${franja.nombre} · turno ${turno.inicio}–${turno.fin}`
       : `Turno ${turno.inicio}–${turno.fin}`;
     if (festivo) td.classList.add('border-t-2', 'border-t-amber-500');
   }
@@ -683,17 +713,16 @@ function celdaTurno(turno, esHoy, emp, dia) {
     td.appendChild(el('span',
       'inline-block px-2 py-1 rounded text-xs font-semibold ' + info.clases, info.texto));
   } else if (turno.descanso) {
+    td.style.backgroundColor = '#ffffff';
     td.appendChild(el('span',
-      'inline-block px-2 py-1 rounded bg-amber-200 text-amber-900 text-xs font-semibold',
+      'inline-block px-2 py-1 rounded border border-slate-300 bg-white text-slate-700 text-xs font-semibold',
       'Descanso'));
   } else if (!tieneHorario) {
     td.appendChild(el('span', 'text-slate-300', '—'));
   } else {
     const cruza = turno.fin < turno.inicio;   // ej. 23:00 -> 06:00
     td.appendChild(el('div', 'font-semibold', turno.inicio));
-    const horaInicio = datosSemana.franjas.find(
-      item => item.id === turno.franja_id
-    )?.hora_inicio || turno.inicio;
+    const horaInicio = turno.inicio;
     const clasesHoraFin = horaInicio === '23:00'
       ? 'text-xs text-white'
       : 'text-xs text-slate-500';

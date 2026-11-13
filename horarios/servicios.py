@@ -38,6 +38,74 @@ FESTIVOS_COLOMBIA_2026 = {
 }
 
 
+def festivos_colombia(anio):
+    if anio == 2026:
+        return FESTIVOS_COLOMBIA_2026
+
+    a = anio % 19
+    b, c = divmod(anio, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    mes = (h + l - 7 * m + 114) // 31
+    dia = (h + l - 7 * m + 114) % 31 + 1
+    pascua = date(anio, mes, dia)
+
+    festivos = {
+        date(anio, 1, 1): 'Año Nuevo',
+        date(anio, 5, 1): 'Día del Trabajo',
+        date(anio, 7, 20): 'Día de la Independencia',
+        date(anio, 8, 7): 'Batalla de Boyacá',
+        date(anio, 12, 8): 'Inmaculada Concepción',
+        date(anio, 12, 25): 'Navidad',
+        pascua - timedelta(days=3): 'Jueves Santo',
+        pascua - timedelta(days=2): 'Viernes Santo',
+    }
+
+    festivos_emiliani = (
+        (1, 6, 'Día de los Reyes Magos'),
+        (3, 19, 'Día de San José'),
+        (6, 29, 'San Pedro y San Pablo'),
+        (8, 15, 'Asunción de la Virgen'),
+        (10, 12, 'Día de la Raza'),
+        (11, 1, 'Día de Todos los Santos'),
+        (11, 11, 'Independencia de Cartagena'),
+    )
+    for mes_festivo, dia_festivo, nombre in festivos_emiliani:
+        fecha = date(anio, mes_festivo, dia_festivo)
+        fecha += timedelta(days=(7 - fecha.weekday()) % 7)
+        festivos[fecha] = nombre
+
+    for dias_despues, nombre in (
+        (39, 'Ascensión del Señor'),
+        (60, 'Corpus Christi'),
+        (68, 'Sagrado Corazón de Jesús'),
+    ):
+        fecha = pascua + timedelta(days=dias_despues)
+        fecha += timedelta(days=(7 - fecha.weekday()) % 7)
+        festivos[fecha] = nombre
+
+    return festivos
+
+
+def fecha_fin_vacaciones(fecha_inicio):
+    fecha = fecha_inicio
+    dias_contados = 0
+    festivos = {}
+    while dias_contados < 15:
+        if fecha.year not in festivos:
+            festivos.update(festivos_colombia(fecha.year))
+        if fecha.weekday() != 6 and fecha not in festivos:
+            dias_contados += 1
+        if dias_contados == 15:
+            return fecha
+        fecha += timedelta(days=1)
+
+
 class CambioInvalido(Exception):
     """El cambio pedido rompe una regla. El mensaje se muestra tal cual al usuario."""
 

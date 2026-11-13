@@ -12,7 +12,8 @@ from .models import (
 )
 from .servicios import (
     FESTIVOS_COLOMBIA_2026, _asignaciones_fin_de_semana,
-    cambiar_horario, convertir_descanso_en_trabajo, generar_semana,
+    cambiar_horario, convertir_descanso_en_trabajo, fecha_fin_vacaciones,
+    festivos_colombia, generar_semana,
 )
 
 
@@ -406,6 +407,14 @@ class LimpiarSemanaTests(TestCase):
             for columna in range(4, 11)
         ]
         self.assertIn('Descanso', valores_turno)
+        columna_descanso = next(
+            columna for columna in range(4, 11)
+            if hoja.cell(fila_tecnico, columna).value == 'Descanso'
+        )
+        self.assertEqual(
+            hoja.cell(fila_tecnico, columna_descanso).fill.fgColor.rgb[-6:],
+            'FFFFFF',
+        )
         self.assertTrue(any(
             isinstance(valor, str) and '–' in valor
             for valor in valores_turno
@@ -546,6 +555,66 @@ class LimpiarSemanaTests(TestCase):
             datos['resumen']['Técnico']['promedio_festivos_trabajados'],
             1,
         )
+
+
+class VacacionesDiasHabilesTests(TestCase):
+    def setUp(self):
+        rol = Rol.objects.create(nombre='Técnico', horas_por_dia=7)
+        self.empleado = Empleado.objects.create(
+            nombre='Técnico de vacaciones',
+            rol=rol,
+        )
+        admin = User.objects.create_user(
+            username='admin-vacaciones',
+            password='password',
+            is_staff=True,
+        )
+        self.client.force_login(admin)
+
+    def test_calcula_quince_dias_sin_domingo_ni_festivo(self):
+        inicio = date(2026, 11, 2)
+
+        respuesta = self.client.get(
+            '/api/vacaciones/fecha-fin/',
+            {'fecha_inicio': inicio.isoformat()},
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(respuesta.json()['dias_habiles'], 15)
+        self.assertEqual(respuesta.json()['fecha_fin'], '2026-11-20')
+        fecha = inicio
+        contados = 0
+        while fecha <= date.fromisoformat(respuesta.json()['fecha_fin']):
+            if fecha.weekday() != 6 and fecha not in FESTIVOS_COLOMBIA_2026:
+                contados += 1
+            fecha += timedelta(days=1)
+        self.assertEqual(contados, 15)
+
+    def test_calcula_festivos_al_cruzar_de_anio(self):
+        self.assertEqual(
+            fecha_fin_vacaciones(date(2026, 12, 24)),
+            date(2027, 1, 13),
+        )
+        festivos_2027 = festivos_colombia(2027)
+        self.assertEqual(festivos_2027[date(2027, 1, 11)], 'Día de los Reyes Magos')
+
+    def test_guardar_vacaciones_calcula_y_guarda_el_final(self):
+        respuesta = self.client.post(
+            '/api/novedades/guardar/',
+            data={
+                'empleado_id': self.empleado.id,
+                'tipo': 'VACACIONES',
+                'fecha_inicio': '2026-11-02',
+                'fecha_fin': '2026-11-07',
+                'nota': '',
+            },
+            content_type='application/json',
+        )
+
+        self.assertEqual(respuesta.status_code, 200, respuesta.content)
+        novedad = Novedad.objects.get(empleado=self.empleado)
+        self.assertEqual(novedad.fecha_inicio, date(2026, 11, 2))
+        self.assertEqual(novedad.fecha_fin, date(2026, 11, 20))
 
 
 class RotacionFinDeSemanaSupervisoresTests(TestCase):
@@ -1877,6 +1946,21 @@ class EdicionHorarioManualTests(TestCase):
         self.assertEqual(turno.inicio.isoformat(), '08:30:00')
         self.assertEqual(turno.fin.isoformat(), '15:30:00')
         self.assertTrue(turno.manual)
+
+        respuesta_excel = self.client.get(
+            '/api/semana/exportar-excel/',
+            {'fecha': self.lunes.isoformat()},
+        )
+        libro = load_workbook(BytesIO(respuesta_excel.content), data_only=True)
+        hoja = libro['Horario semanal']
+        fila_empleado = next(
+            fila for fila in range(4, hoja.max_row + 1)
+            if hoja.cell(fila, 2).value == self.empleado.nombre
+        )
+        self.assertEqual(
+            hoja.cell(fila_empleado, 5).fill.fgColor.rgb[-6:],
+            'F1F5F9',
+        )
 
     def test_rechaza_hora_invalida_y_turno_con_novedad(self):
         respuesta_invalida = self.client.post(

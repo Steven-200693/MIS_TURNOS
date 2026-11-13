@@ -351,7 +351,7 @@ function formNovedad(nov = {}) {
     mostrarMensaje('Primero crea al menos un empleado.', 'error');
     return;
   }
-  abrirFormulario(nov.id ? 'Editar novedad' : 'Nueva novedad', [
+  const controles = abrirFormulario(nov.id ? 'Editar novedad' : 'Nueva novedad', [
     { nombre: 'empleado_id', etiqueta: 'Empleado', tipo: 'select', numerico: true,
       opciones: empleados.map(e => ({ valor: e.id, texto: `${e.nombre} (${e.rol})` })) },
     { nombre: 'tipo', etiqueta: 'Tipo de novedad', tipo: 'select',
@@ -364,6 +364,52 @@ function formNovedad(nov = {}) {
     await cargar();
     resultadoNovedad(r, 'Novedad guardada.');
   });
+  const etiquetaFin = controles.fecha_fin.parentElement.querySelector('span');
+  const ayudaVacaciones = el('p', 'text-xs text-slate-500 mt-1');
+  controles.fecha_fin.parentElement.appendChild(ayudaVacaciones);
+  let solicitudFechaFin = 0;
+
+  const actualizarFechaFinVacaciones = async () => {
+    const esVacaciones = controles.tipo.value === 'VACACIONES';
+    const solicitud = ++solicitudFechaFin;
+    controles.fecha_fin.readOnly = esVacaciones;
+    etiquetaFin.textContent = esVacaciones
+      ? 'Hasta (15 días hábiles, inclusive)'
+      : 'Hasta (inclusive)';
+    ayudaVacaciones.textContent = esVacaciones
+      ? 'Se cuentan los sábados; no se cuentan domingos ni festivos.'
+      : '';
+    if (!esVacaciones) return;
+
+    const fechaInicio = controles.fecha_inicio.value;
+    if (!fechaInicio) {
+      controles.fecha_fin.value = '';
+      return;
+    }
+    ayudaVacaciones.textContent = 'Calculando fecha final…';
+    try {
+      const respuesta = await fetch(
+        `/api/vacaciones/fecha-fin/?fecha_inicio=${encodeURIComponent(fechaInicio)}`,
+        { cache: 'no-store' },
+      );
+      const resultado = await respuesta.json();
+      if (!respuesta.ok) {
+        throw new Error(resultado.error || `El servidor respondió ${respuesta.status}`);
+      }
+      if (solicitud !== solicitudFechaFin || controles.tipo.value !== 'VACACIONES') return;
+      controles.fecha_fin.value = resultado.fecha_fin;
+      ayudaVacaciones.textContent =
+        'Se cuentan los sábados; no se cuentan domingos ni festivos.';
+    } catch (error) {
+      if (solicitud !== solicitudFechaFin) return;
+      controles.fecha_fin.value = '';
+      ayudaVacaciones.textContent = `No se pudo calcular la fecha final: ${error.message}`;
+    }
+  };
+
+  controles.tipo.addEventListener('change', actualizarFechaFinVacaciones);
+  controles.fecha_inicio.addEventListener('change', actualizarFechaFinVacaciones);
+  actualizarFechaFinVacaciones();
 }
 
 async function eliminarNovedad(nov) {

@@ -66,5 +66,10 @@ urlpatterns = [
     path('api/turnos/horario/', views.api_turno_horario, name='api_turno_horario'),
     path('api/tecnicos/franja/', views.api_tecnico_franja, name='api_tecnico_franja'),
     path('api/novedades/guardar/', views.api_novedad_guardar, name='api_novedad_guardar'),
+    path(
+        'api/vacaciones/fecha-fin/',
+        views.api_fecha_fin_vacaciones,
+        name='api_fecha_fin_vacaciones',
+    ),
     path('api/novedades/eliminar/', views.api_novedad_eliminar, name='api_novedad_eliminar'),
 ]

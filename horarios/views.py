@@ -20,7 +20,7 @@ from .models import (
 from .servicios import (
     FESTIVOS_COLOMBIA_2026, CambioInvalido, CoberturaInsuficiente,
     agregar_descanso, cambiar_descansos, cambiar_franja_tecnico,
-    cambiar_horario, convertir_descanso_en_trabajo,
+    cambiar_horario, convertir_descanso_en_trabajo, fecha_fin_vacaciones,
     _asignaciones_fin_de_semana, distribucion_tecnicos_semana, generar_semana,
     intercambiar_descansos, intercambiar_fin_de_semana_supervisores, lunes_de,
     regenerar_rango,
@@ -499,7 +499,7 @@ def api_exportar_semana_excel(request):
                 celdas_turno.append((colores_novedad.get(turno.novedad, 'E2E8F0'), False))
             elif turno.descanso:
                 fila.append('Descanso')
-                celdas_turno.append(('FDE68A', False))
+                celdas_turno.append(('FFFFFF', False))
             elif turno.inicio and turno.fin:
                 cruza = turno.fin < turno.inicio
                 valor = f'{turno.inicio:%H:%M}–{turno.fin:%H:%M}'
@@ -507,15 +507,12 @@ def api_exportar_semana_excel(request):
                     valor += ' (+1)'
                 if turno.remoto:
                     valor += ' (DS)'
-                hora_franja = (
-                    turno.franja.hora_inicio.strftime('%H:%M')
-                    if turno.franja_id else turno.inicio.strftime('%H:%M')
-                )
-                color_franja = colores_franja.get(hora_franja, 'F1F5F9')
+                hora_inicio = turno.inicio.strftime('%H:%M')
+                color_franja = colores_franja.get(hora_inicio, 'F1F5F9')
                 if empleado.rol.nombre.strip().casefold() == 'supervisor':
-                    if hora_franja == '09:00':
+                    if hora_inicio == '09:00':
                         color_franja = 'FCA5A5'
-                    elif hora_franja == '12:00':
+                    elif hora_inicio == '12:00':
                         color_franja = 'BBF7D0'
                 fila.append(valor)
                 celdas_turno.append(
@@ -903,6 +900,21 @@ def _fecha_estricta(texto):
         return None
 
 
+@require_GET
+@solo_staff
+def api_fecha_fin_vacaciones(request):
+    fecha_inicio = _fecha_estricta(request.GET.get('fecha_inicio'))
+    if fecha_inicio is None:
+        return JsonResponse(
+            {'error': 'Indica una fecha de inicio válida.'},
+            status=400,
+        )
+    return JsonResponse({
+        'fecha_fin': fecha_fin_vacaciones(fecha_inicio).isoformat(),
+        'dias_habiles': 15,
+    })
+
+
 def _buscar_empleado(valor):
     try:
         return Empleado.objects.select_related('rol').filter(pk=int(valor), activo=True).first()
@@ -1062,6 +1074,17 @@ def api_novedad_guardar(request):
             if isinstance(valor, str):
                 valor = valor.strip()
             setattr(novedad, campo, valor)
+
+    if novedad.tipo == 'VACACIONES':
+        fecha_inicio = novedad.fecha_inicio
+        if isinstance(fecha_inicio, str):
+            fecha_inicio = _fecha_estricta(fecha_inicio)
+        if fecha_inicio is None:
+            return JsonResponse(
+                {'error': 'Para vacaciones, indica una fecha de inicio válida.'},
+                status=400,
+            )
+        novedad.fecha_fin = fecha_fin_vacaciones(fecha_inicio)
 
     try:
         novedad.full_clean()
