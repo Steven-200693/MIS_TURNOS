@@ -42,6 +42,11 @@ class Empleado(models.Model):
     ]
 
     nombre = models.CharField(max_length=100)
+    numero_recurso = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text="Código de empleado requerido para exportar los partes diarios.",
+    )
     rol = models.ForeignKey(Rol, on_delete=models.PROTECT)
     fecha_ingreso = models.DateField(null=True, blank=True)
     franja = models.ForeignKey(

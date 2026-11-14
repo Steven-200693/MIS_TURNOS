@@ -31,8 +31,22 @@
         </button>
         <button id="btn-exportar-excel" type="button"
                 class="px-3 py-2 bg-sky-100 text-sky-900 rounded shadow hover:bg-sky-200">
-          Exportar Excel
+          Exportar Excel semanal
         </button>
+        {% if es_admin %}
+          <label class="text-sm font-medium">
+            Mes inicial (desde el día 15):
+            <input id="mes-partes" type="month"
+                   class="ml-1 border border-slate-300 rounded px-2 py-2 bg-white">
+          </label>
+          <button id="btn-exportar-partes" type="button"
+                  class="px-3 py-2 bg-violet-100 text-violet-900 rounded shadow hover:bg-violet-200">
+            Exportar partes 15–15 (ZIP)
+          </button>
+          <span class="text-xs text-slate-600">
+            Un Excel por día, horas entre 19:00 y 06:00.
+          </span>
+        {% endif %}
       </div>
 
       <div class="sm:ml-auto flex-wrap gap-2 {% if es_admin %}flex{% else %}hidden{% endif %}">
@@ -232,7 +246,7 @@
     </div>
   </dialog>
 
-  <script src="{% static 'horarios/js/app.js' %}?v=20261104-descanso-blanco-acta-imagen"></script>
+  <script src="{% static 'horarios/js/app.js' %}?v=20261114-partes-nocturnos"></script>
 </body>
 </html>
 

@@ -29,6 +29,11 @@ urlpatterns = [
         views.api_exportar_semana_excel,
         name='api_exportar_semana_excel',
     ),
+    path(
+        'api/partes/exportar-periodo/',
+        views.api_exportar_partes_periodo,
+        name='api_exportar_partes_periodo',
+    ),
     path('api/generar/', views.api_generar, name='api_generar'),
     path(
         'api/tecnicos/distribucion/',

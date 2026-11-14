@@ -17,6 +17,7 @@ from .models import (
     AsignacionActaRetribucion, AsignacionSemanal, Empleado, Franja,
     Novedad, Rol, Turno,
 )
+from .exportacion import crear_zip_partes, rango_periodo_15_a_15
 from .servicios import (
     FESTIVOS_COLOMBIA_2026, CambioInvalido, CoberturaInsuficiente,
     agregar_descanso, cambiar_descansos, cambiar_franja_tecnico,
@@ -25,6 +26,24 @@ from .servicios import (
     intercambiar_descansos, intercambiar_fin_de_semana_supervisores, lunes_de,
     regenerar_rango,
 )
+
+
+def solo_staff(vista):
+    """Decorador: solo deja pasar a administradores con sesión iniciada."""
+    @wraps(vista)
+    def envoltura(request, *args, **kwargs):
+        if not (request.user.is_authenticated and request.user.is_staff):
+            return JsonResponse(
+                {'error': 'Debes iniciar sesión como administrador en /admin/.'},
+                status=403,
+            )
+        return vista(request, *args, **kwargs)
+    return envoltura
+
+
+def _es_tecnico(rol):
+    return bool(rol and rol.nombre.casefold().replace('é', 'e') == 'tecnico')
+
 
 # ===============================================================
 # PARTE 1: Página principal y datos de la semana
@@ -559,22 +578,115 @@ def api_exportar_semana_excel(request):
     return respuesta
 
 
+@require_GET
+@solo_staff
+def api_exportar_partes_periodo(request):
+    try:
+        fecha_inicio, fecha_fin = rango_periodo_15_a_15(
+            request.GET.get('periodo')
+        )
+    except ValueError as error:
+        return JsonResponse({'error': str(error)}, status=400)
+
+    filtro_empleados_periodo = (
+        (
+            Q(activo=True)
+            & (Q(fecha_ingreso__isnull=True) | Q(fecha_ingreso__lte=fecha_fin))
+        )
+        | Q(turno__fecha__range=(fecha_inicio, fecha_fin))
+    )
+    empleados = list(
+        Empleado.objects.filter(
+            Q(rol__nombre__iexact='Tecnico')
+            | Q(rol__nombre__iexact='Técnico'),
+            filtro_empleados_periodo,
+        ).distinct().order_by('nombre')
+    )
+    if not empleados:
+        return JsonResponse(
+            {'error': 'No hay técnicos con datos del período para exportar.'},
+            status=400,
+        )
+
+    sin_recurso = [
+        empleado.nombre for empleado in empleados
+        if not empleado.numero_recurso
+    ]
+    if sin_recurso:
+        return JsonResponse(
+            {
+                'error': (
+                    'Completa el No. Recurso de estos técnicos en '
+                    '«Personal y horarios» antes de exportar: '
+                    + ', '.join(sin_recurso)
+                )
+            },
+            status=400,
+        )
+    numeros_recurso = [empleado.numero_recurso for empleado in empleados]
+    if len(numeros_recurso) != len(set(numeros_recurso)):
+        return JsonResponse(
+            {
+                'error': (
+                    'Hay números de recurso repetidos entre los técnicos '
+                    'incluidos en el período.'
+                )
+            },
+            status=400,
+        )
+
+    turnos = list(
+        Turno.objects.filter(
+            empleado__in=empleados,
+            fecha__range=(fecha_inicio, fecha_fin),
+        ).select_related('empleado').order_by('fecha', 'empleado__nombre')
+    )
+    turnos_por_clave = {
+        (turno.empleado_id, turno.fecha) for turno in turnos
+    }
+    dias_sin_turno = set()
+    for empleado in empleados:
+        if not empleado.activo:
+            continue
+        for indice in range((fecha_fin - fecha_inicio).days + 1):
+            fecha = fecha_inicio + timedelta(days=indice)
+            if empleado.fecha_ingreso and fecha < empleado.fecha_ingreso:
+                continue
+            if (empleado.id, fecha) not in turnos_por_clave:
+                dias_sin_turno.add(fecha)
+    if dias_sin_turno:
+        dias_faltantes = ', '.join(
+            fecha.strftime('%d/%m/%Y')
+            for fecha in sorted(dias_sin_turno)[:8]
+        )
+        return JsonResponse(
+            {
+                'error': (
+                    'Faltan turnos generados para completar el período. '
+                    f'Días sin datos: {dias_faltantes}'
+                    + ('…' if len(dias_sin_turno) > 8 else '')
+                )
+            },
+            status=400,
+        )
+
+    contenido = crear_zip_partes(
+        fecha_inicio,
+        fecha_fin,
+        empleados,
+        turnos,
+    )
+    respuesta = HttpResponse(contenido, content_type='application/zip')
+    respuesta['Content-Disposition'] = (
+        'attachment; filename='
+        f'"partes-{fecha_inicio.isoformat()}-a-{fecha_fin.isoformat()}.zip"'
+    )
+    return respuesta
+
+
 # ===============================================================
 # PARTE 2: Herramientas de seguridad y guardado (Etapa 6)
 # ===============================================================
-
-def solo_staff(vista):
-    """Decorador: solo deja pasar a administradores con sesión iniciada."""
-    @wraps(vista)
-    def envoltura(request, *args, **kwargs):
-        if not (request.user.is_authenticated and request.user.is_staff):
-            return JsonResponse(
-                {'error': 'Debes iniciar sesión como administrador en /admin/.'},
-                status=403,
-            )
-        return vista(request, *args, **kwargs)
-    return envoltura
-
 
 def _leer_json(request):
     """Convierte el cuerpo de la petición en un diccionario. Devuelve None si es inválido."""
@@ -585,9 +697,10 @@ def _leer_json(request):
     return datos if isinstance(datos, dict) else None
 
 
-def _guardar(request, modelo, campos, validar=None):
+def _guardar(request, modelo, campos, validar=None, datos=None):
     """Crea o edita un registro. Si viene 'id' edita, si no, crea."""
-    datos = _leer_json(request)
+    if datos is None:
+        datos = _leer_json(request)
     if datos is None:
         return JsonResponse({'error': 'Los datos enviados no son válidos.'}, status=400)
 
@@ -651,6 +764,7 @@ def api_personal(request):
 
     empleados = [
         {'id': e.id, 'nombre': e.nombre, 'rol_id': e.rol_id, 'rol': e.rol.nombre,
+         'numero_recurso': e.numero_recurso if _es_tecnico(e.rol) else '',
          'fecha_ingreso': e.fecha_ingreso.isoformat() if e.fecha_ingreso else None,
          'franja_id': e.franja_id, 'franja': e.franja.nombre if e.franja else None,
          'preferencia_descanso': e.preferencia_descanso, 'activo': e.activo}
@@ -684,11 +798,28 @@ def api_empleado_guardar(request):
     datos = _leer_json(request)
     if datos is None:
         return JsonResponse({'error': 'Los datos enviados no son válidos.'}, status=400)
-    rol = Rol.objects.filter(pk=datos.get('rol_id')).first()
-    es_tecnico = bool(
-        rol
-        and rol.nombre.casefold().replace('é', 'e') == 'tecnico'
+    empleado_actual = None
+    if 'id' in datos:
+        if (
+            not isinstance(datos['id'], int)
+            or isinstance(datos['id'], bool)
+        ):
+            return JsonResponse(
+                {'error': 'El identificador del empleado no es válido.'},
+                status=400,
+            )
+        empleado_actual = Empleado.objects.filter(pk=datos['id']).first()
+        if empleado_actual is None:
+            return JsonResponse(
+                {'error': 'Ese registro ya no existe.'},
+                status=404,
+            )
+    rol = (
+        Rol.objects.filter(pk=datos['rol_id']).first()
+        if 'rol_id' in datos
+        else empleado_actual.rol if empleado_actual else None
     )
+    es_tecnico = _es_tecnico(rol)
     if es_tecnico and not datos.get('id') and not datos.get('fecha_ingreso'):
         return JsonResponse(
             {'error': 'La fecha de ingreso es obligatoria para crear un técnico.'},
@@ -702,12 +833,52 @@ def api_empleado_guardar(request):
                 {'error': 'La fecha de ingreso no es válida. Usa AAAA-MM-DD.'},
                 status=400,
             )
+    numero_recurso = datos.get('numero_recurso')
+    if numero_recurso is not None:
+        if not isinstance(numero_recurso, str):
+            return JsonResponse(
+                {'error': 'El número de recurso debe ser texto.'},
+                status=400,
+            )
+        if not es_tecnico and numero_recurso.strip():
+            return JsonResponse(
+                {'error': 'El número de recurso solo aplica a los técnicos.'},
+                status=400,
+            )
+        numero_recurso = numero_recurso.strip()
+        if len(numero_recurso) > 50:
+            return JsonResponse(
+                {'error': 'El número de recurso no puede superar 50 caracteres.'},
+                status=400,
+            )
+        if numero_recurso:
+            empleados_con_recurso = Empleado.objects.filter(
+                numero_recurso=numero_recurso,
+            )
+            if datos.get('id'):
+                empleados_con_recurso = empleados_con_recurso.exclude(
+                    pk=datos['id']
+                )
+            if empleados_con_recurso.exists():
+                return JsonResponse(
+                    {
+                        'error': (
+                            'Ese número de recurso ya está asignado '
+                            'a otro empleado.'
+                        )
+                    },
+                    status=400,
+                )
+        datos['numero_recurso'] = numero_recurso
+    if 'rol_id' in datos and not es_tecnico:
+        datos['numero_recurso'] = ''
     return _guardar(
         request, Empleado,
         [
-            'nombre', 'rol_id', 'fecha_ingreso', 'franja_id',
+            'nombre', 'numero_recurso', 'rol_id', 'fecha_ingreso', 'franja_id',
             'preferencia_descanso', 'activo',
         ],
+        datos=datos,
     )
 
 

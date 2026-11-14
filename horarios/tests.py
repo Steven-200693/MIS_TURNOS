@@ -1,6 +1,7 @@
 from datetime import date, time, timedelta
 from io import BytesIO
 from unittest.mock import patch
+from zipfile import ZipFile
 
 from django.contrib.auth.models import User
 from django.test import TestCase
@@ -2027,3 +2028,295 @@ class EdicionHorarioManualTests(TestCase):
         self.assertEqual(turno.inicio.isoformat(), '07:00:00')
         self.assertEqual(turno.fin.isoformat(), '19:00:00')
         self.assertTrue(turno.remoto)
+
+
+class ExportacionPartesNocturnosTests(TestCase):
+    def setUp(self):
+        self.rol = Rol.objects.create(nombre='Técnico', horas_por_dia=7)
+        self.empleado = Empleado.objects.create(
+            nombre='Técnico nocturno',
+            numero_recurso='77026',
+            rol=self.rol,
+            fecha_ingreso=date(2026, 9, 1),
+        )
+        admin = User.objects.create_user(
+            username='admin-partes',
+            password='password',
+            is_staff=True,
+        )
+        self.client.force_login(admin)
+        self.fecha_inicio = date(2026, 9, 15)
+        self.fecha_fin = date(2026, 10, 15)
+        fecha = self.fecha_inicio
+        while fecha <= self.fecha_fin:
+            inicio, fin = time(16), time(23)
+            if fecha == date(2026, 10, 13):
+                inicio, fin = time(21), time(3)
+            Turno.objects.create(
+                empleado=self.empleado,
+                fecha=fecha,
+                inicio=inicio,
+                fin=fin,
+            )
+            fecha += timedelta(days=1)
+
+    def test_exporta_zip_con_un_excel_por_dia_y_formato_de_la_plantilla(self):
+        respuesta = self.client.get(
+            '/api/partes/exportar-periodo/',
+            {'periodo': '2026-09'},
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(respuesta['Content-Type'], 'application/zip')
+        with ZipFile(BytesIO(respuesta.content)) as archivo_zip:
+            nombres = archivo_zip.namelist()
+            self.assertEqual(len(nombres), 31)
+            self.assertIn('Parte-Trabajo-2026-10-12.xlsx', nombres)
+            self.assertIn('Parte-Trabajo-2026-10-15.xlsx', nombres)
+
+            libro = load_workbook(
+                BytesIO(archivo_zip.read('Parte-Trabajo-2026-10-12.xlsx')),
+                data_only=True,
+            )
+            self.assertEqual(
+                libro.sheetnames,
+                [
+                    'Parte',
+                    'Control de partes',
+                    'Proyectos',
+                    'Centros de coste',
+                    'Trabajadores',
+                    'Ausencia',
+                    'Motivos ausencia',
+                ],
+            )
+            hoja = libro['Parte']
+            self.assertEqual(hoja.max_column, 18)
+            self.assertEqual(hoja['A2'].value, '77026| TÉCNICO NOCTURNO')
+            self.assertEqual(hoja['G2'].value, 4)
+            self.assertIsNone(hoja['D2'].value)
+            self.assertEqual(hoja['O2'].value, 'OP01| OPERADORA HOSPITAL BOSA')
+            self.assertEqual(
+                hoja['P2'].value,
+                'OP0101.01.07.03.03| TECNICOS',
+            )
+            self.assertEqual(
+                load_workbook(
+                    BytesIO(archivo_zip.read('Parte-Trabajo-2026-10-13.xlsx')),
+                    data_only=True,
+                )['Parte']['G2'].value,
+                6,
+            )
+            libro.close()
+
+    def test_rechaza_periodo_invalido(self):
+        respuesta = self.client.get(
+            '/api/partes/exportar-periodo/',
+            {'periodo': '2026-13'},
+        )
+
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('AAAA-MM', respuesta.json()['error'])
+
+    def test_rechaza_exportacion_sin_numero_de_recurso(self):
+        self.empleado.numero_recurso = ''
+        self.empleado.save(update_fields=['numero_recurso'])
+
+        respuesta = self.client.get(
+            '/api/partes/exportar-periodo/',
+            {'periodo': '2026-09'},
+        )
+
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('No. Recurso', respuesta.json()['error'])
+
+    def test_rechaza_periodo_con_dias_sin_turno_generado(self):
+        Turno.objects.filter(
+            empleado=self.empleado,
+            fecha=date(2026, 10, 1),
+        ).delete()
+
+        respuesta = self.client.get(
+            '/api/partes/exportar-periodo/',
+            {'periodo': '2026-09'},
+        )
+
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('Faltan turnos generados', respuesta.json()['error'])
+
+    def test_requiere_administrador_para_exportar(self):
+        self.client.logout()
+
+        respuesta = self.client.get(
+            '/api/partes/exportar-periodo/',
+            {'periodo': '2026-09'},
+        )
+
+        self.assertEqual(respuesta.status_code, 403)
+
+    def test_selector_de_periodo_solo_se_muestra_a_administradores(self):
+        self.assertContains(self.client.get('/'), 'id="mes-partes"')
+        self.client.logout()
+        self.assertNotContains(self.client.get('/'), 'id="mes-partes"')
+
+    def test_admin_puede_guardar_numero_de_recurso_y_no_repetirlo(self):
+        respuesta = self.client.post(
+            '/api/empleados/guardar/',
+            data={
+                'id': self.empleado.id,
+                'numero_recurso': '77026-1',
+            },
+            content_type='application/json',
+        )
+        self.assertEqual(respuesta.status_code, 200)
+        self.empleado.refresh_from_db()
+        self.assertEqual(self.empleado.numero_recurso, '77026-1')
+
+        otro = Empleado.objects.create(
+            nombre='Otro técnico',
+            numero_recurso='77099',
+            rol=self.rol,
+        )
+        respuesta_duplicada = self.client.post(
+            '/api/empleados/guardar/',
+            data={
+                'id': otro.id,
+                'numero_recurso': '77026-1',
+            },
+            content_type='application/json',
+        )
+        self.assertEqual(respuesta_duplicada.status_code, 400)
+        otro.refresh_from_db()
+        self.assertEqual(otro.numero_recurso, '77099')
+
+    def test_numero_de_recurso_acepta_mas_de_20_caracteres(self):
+        numero_recurso = 'RECURSO-TECNICO-2026-EXTENDIDO'
+        self.assertGreater(len(numero_recurso), 20)
+        self.assertLessEqual(len(numero_recurso), 50)
+
+        respuesta = self.client.post(
+            '/api/empleados/guardar/',
+            data={
+                'id': self.empleado.id,
+                'numero_recurso': numero_recurso,
+            },
+            content_type='application/json',
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.empleado.refresh_from_db()
+        self.assertEqual(self.empleado.numero_recurso, numero_recurso)
+
+    def test_numero_de_recurso_solo_aplica_a_tecnicos(self):
+        supervisor_rol = Rol.objects.create(
+            nombre='Supervisor',
+            horas_por_dia=6,
+        )
+        supervisor = Empleado.objects.create(
+            nombre='Supervisor de prueba',
+            numero_recurso='',
+            rol=supervisor_rol,
+        )
+
+        respuesta = self.client.post(
+            '/api/empleados/guardar/',
+            data={
+                'id': supervisor.id,
+                'numero_recurso': '77026',
+            },
+            content_type='application/json',
+        )
+
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('solo aplica a los técnicos', respuesta.json()['error'])
+        supervisor.refresh_from_db()
+        self.assertEqual(supervisor.numero_recurso, '')
+
+    def test_al_cambiar_a_otro_rol_limpia_el_numero_de_recurso(self):
+        supervisor_rol = Rol.objects.create(
+            nombre='Supervisor',
+            horas_por_dia=6,
+        )
+
+        respuesta = self.client.post(
+            '/api/empleados/guardar/',
+            data={
+                'id': self.empleado.id,
+                'rol_id': supervisor_rol.id,
+            },
+            content_type='application/json',
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.empleado.refresh_from_db()
+        self.assertEqual(self.empleado.rol, supervisor_rol)
+        self.assertEqual(self.empleado.numero_recurso, '')
+
+    def test_incluye_empleado_inactivo_con_turnos_historicos(self):
+        anterior = Empleado.objects.create(
+            nombre='Técnico retirado',
+            numero_recurso='77099',
+            rol=self.rol,
+            activo=False,
+        )
+        Turno.objects.create(
+            empleado=anterior,
+            fecha=date(2026, 10, 12),
+            inicio=time(18),
+            fin=time(21),
+        )
+
+        respuesta = self.client.get(
+            '/api/partes/exportar-periodo/',
+            {'periodo': '2026-09'},
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        with ZipFile(BytesIO(respuesta.content)) as archivo_zip:
+            libro = load_workbook(
+                BytesIO(archivo_zip.read('Parte-Trabajo-2026-10-12.xlsx')),
+                data_only=True,
+            )
+            hoja = libro['Parte']
+            recursos = {
+                hoja.cell(fila, 1).value
+                for fila in range(2, hoja.max_row + 1)
+            }
+            self.assertIn('77099| TÉCNICO RETIRADO', recursos)
+            self.assertIn(2, [hoja.cell(fila, 7).value for fila in range(2, hoja.max_row + 1)])
+            libro.close()
+
+    def test_exporta_solo_tecnicos_y_omite_supervisores(self):
+        supervisor_rol = Rol.objects.create(
+            nombre='Supervisor',
+            horas_por_dia=6,
+        )
+        supervisor = Empleado.objects.create(
+            nombre='Supervisor de prueba',
+            rol=supervisor_rol,
+            fecha_ingreso=self.fecha_inicio,
+        )
+        Turno.objects.create(
+            empleado=supervisor,
+            fecha=date(2026, 10, 12),
+            inicio=time(19),
+            fin=time(23),
+        )
+
+        respuesta = self.client.get(
+            '/api/partes/exportar-periodo/',
+            {'periodo': '2026-09'},
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        with ZipFile(BytesIO(respuesta.content)) as archivo_zip:
+            libro = load_workbook(
+                BytesIO(archivo_zip.read('Parte-Trabajo-2026-10-12.xlsx')),
+                data_only=True,
+            )
+            recursos = [
+                libro['Parte'].cell(fila, 1).value
+                for fila in range(2, libro['Parte'].max_row + 1)
+            ]
+            self.assertFalse(any('SUPERVISOR' in (valor or '') for valor in recursos))
+            libro.close()

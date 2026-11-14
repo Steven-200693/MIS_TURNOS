@@ -38,6 +38,8 @@ const $btnDescartar = document.getElementById('btn-descartar');
 const $btnLimpiar = document.getElementById('btn-limpiar');
 const $btnCopiarImagen = document.getElementById('btn-copiar-imagen');
 const $btnExportarExcel = document.getElementById('btn-exportar-excel');
+const $btnExportarPartes = document.getElementById('btn-exportar-partes');
+const $mesPartes = document.getElementById('mes-partes');
 const $distribucionTecnicos = document.getElementById('distribucion-tecnicos');
 const $distribucionResumen = document.getElementById('distribucion-resumen');
 const $btnGuardarDistribucion = document.getElementById('btn-guardar-distribucion');
@@ -47,6 +49,7 @@ const ES_ADMIN = document.body.dataset.admin === '1';
 
 // Fecha que se está mostrando, como texto 'AAAA-MM-DD'
 let fechaActual = aTexto(new Date());
+if ($mesPartes) $mesPartes.value = fechaActual.slice(0, 7);
 let datosSemana = null;   // última respuesta de /api/semana/
 let asignacionActa = null;
 let mesAsignacionActa = null;
@@ -361,6 +364,40 @@ async function exportarExcelHorario() {
     mostrarError(`No se pudo exportar el Excel: ${error.message}`);
   } finally {
     $btnExportarExcel.disabled = false;
+  }
+}
+
+async function exportarPartesPeriodo() {
+  const periodo = $mesPartes.value;
+  if (!periodo) {
+    mostrarError('Selecciona el mes en que inicia el período.');
+    return;
+  }
+  $btnExportarPartes.disabled = true;
+  try {
+    const respuesta = await fetch(
+      `/api/partes/exportar-periodo/?periodo=${encodeURIComponent(periodo)}`
+    );
+    if (!respuesta.ok) {
+      const error = await respuesta.json().catch(() => ({}));
+      throw new Error(error.error || `El servidor respondió ${respuesta.status}`);
+    }
+    const archivo = await respuesta.blob();
+    const url = URL.createObjectURL(archivo);
+    const enlace = document.createElement('a');
+    enlace.href = url;
+    const disposition = respuesta.headers.get('Content-Disposition') || '';
+    const nombre = disposition.match(/filename="([^"]+)"/);
+    enlace.download = nombre ? nombre[1] : `partes-${periodo}.zip`;
+    document.body.appendChild(enlace);
+    enlace.click();
+    enlace.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    mostrarOk('Se descargó el ZIP con un Excel por cada día del período.');
+  } catch (error) {
+    mostrarError(`No se pudieron exportar los partes: ${error.message}`);
+  } finally {
+    $btnExportarPartes.disabled = false;
   }
 }
 
@@ -884,6 +921,9 @@ document.getElementById('btn-siguiente').addEventListener('click', () => irA(sum
 document.getElementById('btn-hoy').addEventListener('click', () => irA(aTexto(new Date())));
 $btnCopiarImagen.addEventListener('click', copiarImagenHorario);
 $btnExportarExcel.addEventListener('click', exportarExcelHorario);
+if ($btnExportarPartes) {
+  $btnExportarPartes.addEventListener('click', exportarPartesPeriodo);
+}
 
 if ($btnGuardarDistribucion) {
   $btnGuardarDistribucion.addEventListener('click', async () => {

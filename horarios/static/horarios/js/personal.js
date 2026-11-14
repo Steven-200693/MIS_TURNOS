@@ -45,6 +45,11 @@ function etiquetaPreferencia(valor) {
   return p ? p.texto : valor;
 }
 
+function esRolTecnico(nombre) {
+  return nombre.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    === 'tecnico';
+}
+
 // Envía datos en JSON al servidor. Si algo falla, lanza un Error con el mensaje.
 async function enviar(url, cuerpo) {
   const respuesta = await fetch(url, {
@@ -131,6 +136,7 @@ function pintarFranjas() {
 
 function pintarEmpleados() {
   const filas = datos.empleados.map(e => {
+    const esTecnico = esRolTecnico(e.rol);
     const estado = el('span',
       'px-2 py-1 rounded text-xs font-semibold ' +
       (e.activo ? 'bg-green-100 text-green-800' : 'bg-slate-200 text-slate-600'),
@@ -144,12 +150,14 @@ function pintarEmpleados() {
 
     return {
       inactiva: !e.activo,
-      celdas: [e.nombre, e.rol, e.fecha_ingreso || 'Sin registrar', e.franja || 'Sin franja',
+      celdas: [e.nombre, esTecnico ? (e.numero_recurso || 'Sin número de recurso') : '—', e.rol,
+               e.fecha_ingreso || 'Sin registrar', e.franja || 'Sin franja',
                etiquetaPreferencia(e.preferencia_descanso), estado, acciones],
     };
   });
   dibujarTabla($empleados,
-    ['Nombre', 'Rol', 'Fecha de ingreso', 'Franja', 'Descanso preferido', 'Estado', 'Acciones'],
+    ['Nombre', 'No. Recurso', 'Rol', 'Fecha de ingreso', 'Franja',
+     'Descanso preferido', 'Estado', 'Acciones'],
     filas, 'Todavía no hay empleados.');
 }
 
@@ -253,7 +261,7 @@ function formEmpleado(empleado = {}) {
     String(hoy.getMonth() + 1).padStart(2, '0'),
     String(hoy.getDate()).padStart(2, '0'),
   ].join('-');
-  const controles = abrirFormulario(empleado.id ? 'Editar empleado' : 'Nuevo empleado', [
+  const camposEmpleado = [
     { nombre: 'nombre', etiqueta: 'Nombre completo', tipo: 'text' },
     { nombre: 'rol_id', etiqueta: 'Rol', tipo: 'select', numerico: true,
       opciones: datos.roles.map(r => ({ valor: r.id, texto: r.nombre })) },
@@ -262,7 +270,16 @@ function formEmpleado(empleado = {}) {
       opciones: [{ valor: '', texto: 'Sin franja' }] },
     { nombre: 'preferencia_descanso', etiqueta: 'Día de descanso preferido', tipo: 'select',
       opciones: PREFERENCIAS },
-  ], { fecha_ingreso: empleado.fecha_ingreso || '', ...empleado }, async (cuerpo) => {
+  ];
+  const indiceRol = camposEmpleado.findIndex(campo => campo.nombre === 'rol_id');
+  camposEmpleado.splice(indiceRol + 1, 0, {
+    nombre: 'numero_recurso',
+    etiqueta: 'No. Recurso (solo técnicos)',
+    tipo: 'text',
+    opcional: true,
+  });
+  const controles = abrirFormulario(empleado.id ? 'Editar empleado' : 'Nuevo empleado',
+    camposEmpleado, { fecha_ingreso: empleado.fecha_ingreso || '', ...empleado }, async (cuerpo) => {
     await enviar('/api/empleados/guardar/', cuerpo);
     await cargar();
     mostrarMensaje('Empleado guardado. Sus turnos empezarán desde la fecha de ingreso al generar el horario.');
@@ -279,10 +296,10 @@ function formEmpleado(empleado = {}) {
 
   const actualizarFechaIngresoObligatoria = () => {
     const rol = datos.roles.find(item => item.id === Number(controles.rol_id.value));
-    const esTecnico = rol
-      && rol.nombre.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
-        === 'tecnico';
+    const esTecnico = rol && esRolTecnico(rol.nombre);
     controles.fecha_ingreso.required = Boolean(esTecnico);
+    controles.numero_recurso.parentElement.hidden = !esTecnico;
+    if (!esTecnico) controles.numero_recurso.value = '';
     if (esTecnico && !controles.fecha_ingreso.value && !empleado.id) {
       controles.fecha_ingreso.value = fechaHoy;
     }
