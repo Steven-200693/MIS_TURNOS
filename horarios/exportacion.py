@@ -1,68 +1,19 @@
 from datetime import date, datetime, time, timedelta
 from io import BytesIO
+from pathlib import Path
+import re
 from zipfile import ZIP_DEFLATED, ZipFile
-
-from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.styles.colors import Color
+from xml.sax.saxutils import escape
 
 
-ENCABEZADOS_PARTE = (
-    'No. Recurso',
-    'Control de partes',
-    'Horas ordinarias',
-    'Horas ordinarias Dom/Fest',
-    'Horas extras diurnas',
-    'Horas extras nocturnas',
-    'Recargo hora nocturna ord',
-    'Horas extras diurnas Dom/Fest',
-    'Horas extras noct. Dom/Fest',
-    'Recargo hora noc Dom/Fest',
-    'Hora Diurna Ord. Dom/Fest c/Comp',
-    'Hora Diurna Ord. Dom/Fest s/Comp',
-    'Hora Noct. Ord. Dom/Fest c/Comp',
-    'Hora Noct. Ord. Dom/Fest s/Comp',
-    'No. Proyecto',
-    'Centro de coste',
-    'Ausente',
-    'Motivo ausencia',
+PLANTILLA_PARTE = (
+    Path(__file__).resolve().parent
+    / 'plantillas'
+    / 'Plantilla Parte Trabajov2.xlsx'
 )
 
 PROYECTO = 'OP01| OPERADORA HOSPITAL BOSA'
 CENTRO_COSTE = 'OP0101.01.07.03.03| TECNICOS'
-MOTIVOS_AUSENCIA = (
-    'ACCTRA| ACCIDENTE DE TRABAJO',
-    'AUSIN| AUSENCIA INJUSTIFICADA',
-    'COMPEN| COMPENSATORIO',
-    'DCSO| DESCANSO',
-    'INCEGRPRO| INCAPACIDAD ENF. PROFESIONAL',
-    'INCGRL| INCAPACIDAD POR ENF. GENERAL',
-    'INCGRL100| INCAPACIDAD ENF. GENERAL 100%',
-    'LICLUTO| LICENCIA POR LUTO',
-    'LICMAT| LICENCIA MATERNIDAD',
-    'LICNOR| LICENCIA NO REMUNERADA',
-    'LICPAT| LICENCIA PATERNIDAD',
-    'LICREM| LICENCIA REMUNERADA',
-    'SANDISC| SANCIÓN DISCIPLINARIA',
-    'SUSCTO| SUSPENSION CTO POR FUERZA MAYOR',
-    'SUSP| SUSPENSIONES',
-    'VACDIS| VACACIONES DISFRUTADAS',
-    'VACPAG| VACACIONES COMPENSADAS DINERO',
-)
-
-ANCHO_COLUMNAS = {
-    'A': 15.29,
-    'B': 27.29,
-    'C': 27.29,
-    'K': 34.57,
-    'L': 35.43,
-    'M': 33.43,
-    'N': 32.29,
-    'O': 25.71,
-    'P': 18.71,
-    'Q': 11.43,
-    'R': 15.71,
-}
 
 
 def rango_periodo_15_a_15(mes):
@@ -106,56 +57,74 @@ def horas_nocturnas(turno, fecha):
     return round((fin - inicio).total_seconds() / 3600, 2)
 
 
-def _agregar_hojas_catalogo(libro, empleados):
-    control = libro.create_sheet('Control de partes')
-    control.append(['Parte diario'])
-    control.append(['Parte en el periodo'])
+def _celda_texto_xml(columna, fila, valor):
+    return (
+        f'<c r="{columna}{fila}" t="inlineStr"><is>'
+        f'<t xml:space="preserve">{escape(valor)}</t></is></c>'
+    )
 
-    proyectos = libro.create_sheet('Proyectos')
-    proyectos.append([PROYECTO])
 
-    centros = libro.create_sheet('Centros de coste')
-    centros.append([CENTRO_COSTE])
+def _fila_parte_xml(numero, empleado, horas):
+    nombre_empleado = (
+        f'{empleado.numero_recurso}| {empleado.nombre.upper()}'
+    )
+    return (
+        f'<row r="{numero}" spans="1:18">'
+        f'{_celda_texto_xml("A", numero, nombre_empleado)}'
+        f'<c r="G{numero}"><v>{horas}</v></c>'
+        f'{_celda_texto_xml("O", numero, PROYECTO)}'
+        f'{_celda_texto_xml("P", numero, CENTRO_COSTE)}'
+        '</row>'
+    )
 
-    trabajadores = libro.create_sheet('Trabajadores')
-    for empleado in empleados:
-        trabajadores.append([
-            f'{empleado.numero_recurso}| {empleado.nombre.upper()}'
-        ])
 
-    ausencia = libro.create_sheet('Ausencia')
-    ausencia.append(['Si'])
-    ausencia.append(['No'])
+def _insertar_filas_parte(xml, filas):
+    if not filas:
+        return xml
 
-    motivos = libro.create_sheet('Motivos ausencia')
-    for motivo in MOTIVOS_AUSENCIA:
-        motivos.append([motivo])
+    dimension = re.search(
+        r'<dimension ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"\s*/>',
+        xml,
+    )
+    if dimension is None:
+        raise ValueError('La plantilla de partes no tiene una dimensión válida.')
+
+    inicio = xml.index('<sheetData>')
+    fin = xml.index('</sheetData>', inicio)
+    datos = xml[inicio + len('<sheetData>'):fin]
+
+    def desplazar_fila(match):
+        numero = int(match.group(2))
+        if numero > 1:
+            numero += len(filas)
+        return f'{match.group(1)}{numero}{match.group(3)}'
+
+    datos = re.sub(
+        r'(<row\b[^>]*?\br=")(\d+)(")',
+        desplazar_fila,
+        datos,
+    )
+    fin_encabezado = datos.find('</row>')
+    if fin_encabezado == -1:
+        raise ValueError('La plantilla de partes no tiene una fila de encabezado.')
+    fin_encabezado += len('</row>')
+    nuevas_filas = ''.join(
+        _fila_parte_xml(numero, empleado, horas)
+        for numero, empleado, horas in filas
+    )
+    datos = datos[:fin_encabezado] + nuevas_filas + datos[fin_encabezado:]
+    xml = xml[:inicio + len('<sheetData>')] + datos + xml[fin:]
+
+    dimension_actualizada = (
+        f'<dimension ref="{dimension.group(1)}{dimension.group(2)}:'
+        f'{dimension.group(3)}{int(dimension.group(4)) + len(filas)}"/>'
+    )
+    return xml[:dimension.start()] + dimension_actualizada + xml[dimension.end():]
 
 
 def crear_excel_diario(fecha, empleados, turnos):
-    libro = Workbook()
-    hoja = libro.active
-    hoja.title = 'Parte'
-    hoja.append(ENCABEZADOS_PARTE)
-    hoja.row_dimensions[1].height = 29.45
-
-    relleno_encabezado = PatternFill(
-        fill_type='solid',
-        fgColor=Color(theme=5, tint=0.5999938962981048),
-    )
-    for celda in hoja[1]:
-        celda.fill = relleno_encabezado
-        celda.font = Font(name='Calibri', size=11)
-        celda.alignment = Alignment(
-            horizontal='center',
-            vertical='top',
-            wrap_text=True,
-        )
-    hoja['R1'].number_format = '@'
-    for columna, ancho in ANCHO_COLUMNAS.items():
-        hoja.column_dimensions[columna].width = ancho
-
     turnos_por_empleado = {turno.empleado_id: turno for turno in turnos}
+    filas = []
     for empleado in empleados:
         turno = turnos_por_empleado.get(empleado.id)
         if (
@@ -167,20 +136,25 @@ def crear_excel_diario(fecha, empleados, turnos):
         ):
             continue
         horas = horas_nocturnas(turno, fecha)
-        fila = [None] * len(ENCABEZADOS_PARTE)
-        fila[0] = f'{empleado.numero_recurso}| {empleado.nombre.upper()}'
-        if horas:
-            fila[6] = horas
-        fila[14] = PROYECTO
-        fila[15] = CENTRO_COSTE
-        hoja.append(fila)
-
-    _agregar_hojas_catalogo(libro, empleados)
-    libro.properties.title = f'Parte de trabajo {fecha:%d-%m-%Y}'
-    libro.properties.subject = f'Parte diario del {fecha:%d/%m/%Y}'
+        if not horas:
+            continue
+        filas.append((len(filas) + 2, empleado, horas))
 
     salida = BytesIO()
-    libro.save(salida)
+    with ZipFile(PLANTILLA_PARTE, 'r') as plantilla:
+        xml_parte = plantilla.read(
+            'xl/worksheets/sheet1.xml'
+        ).decode('utf-8')
+        xml_parte = _insertar_filas_parte(xml_parte, filas)
+        with ZipFile(salida, 'w', compression=ZIP_DEFLATED) as libro:
+            libro.comment = plantilla.comment
+            for entrada in plantilla.infolist():
+                contenido = (
+                    xml_parte.encode('utf-8')
+                    if entrada.filename == 'xl/worksheets/sheet1.xml'
+                    else plantilla.read(entrada.filename)
+                )
+                libro.writestr(entrada, contenido)
     return salida.getvalue()
 
 

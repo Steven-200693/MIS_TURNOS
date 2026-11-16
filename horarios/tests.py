@@ -1,5 +1,6 @@
 from datetime import date, time, timedelta
 from io import BytesIO
+from pathlib import Path
 from unittest.mock import patch
 from zipfile import ZipFile
 
@@ -2109,6 +2110,130 @@ class ExportacionPartesNocturnosTests(TestCase):
             )
             libro.close()
 
+    def test_exporta_plantilla_diaria_para_tecnicos_con_recargo_activos(self):
+        tecnico_diurno = Empleado.objects.create(
+            nombre='Técnico diurno',
+            numero_recurso='',
+            rol=self.rol,
+        )
+        Turno.objects.create(
+            empleado=tecnico_diurno,
+            fecha=date(2026, 10, 12),
+            inicio=time(8),
+            fin=time(16),
+        )
+        tecnico_inactivo = Empleado.objects.create(
+            nombre='Técnico inactivo',
+            numero_recurso='77098',
+            rol=self.rol,
+            activo=False,
+        )
+        Turno.objects.create(
+            empleado=tecnico_inactivo,
+            fecha=date(2026, 10, 12),
+            inicio=time(19),
+            fin=time(23),
+        )
+
+        respuesta = self.client.get(
+            '/api/partes/exportar-diario/',
+            {'fecha': '2026-10-12'},
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(
+            respuesta['Content-Type'],
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        self.assertIn('parte-trabajo-2026-10-12.xlsx', respuesta['Content-Disposition'])
+        libro = load_workbook(BytesIO(respuesta.content), data_only=True)
+        hoja = libro['Parte']
+        recursos = [
+            hoja.cell(fila, 1).value
+            for fila in range(2, hoja.max_row + 1)
+            if hoja.cell(fila, 1).value
+        ]
+        self.assertEqual(recursos, ['77026| TÉCNICO NOCTURNO'])
+        self.assertEqual(hoja['G2'].value, 4)
+        libro.close()
+
+    def test_exporta_parte_diario_rechaza_fecha_invalida(self):
+        respuesta = self.client.get(
+            '/api/partes/exportar-diario/',
+            {'fecha': 'fecha-invalida'},
+        )
+
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertIn('fecha válida', respuesta.json()['error'])
+
+    def test_muestra_opcion_diaria_a_administrador(self):
+        respuesta = self.client.get('/')
+
+        self.assertContains(respuesta, 'id="fecha-parte-diario"')
+        self.assertContains(respuesta, 'id="btn-exportar-diario"')
+
+    def test_excluye_del_excel_tecnicos_sin_recargos(self):
+        tecnico_diurno = Empleado.objects.create(
+            nombre='Técnico diurno',
+            numero_recurso='77027',
+            rol=self.rol,
+            fecha_ingreso=date(2026, 9, 1),
+        )
+        fecha = self.fecha_inicio
+        while fecha <= self.fecha_fin:
+            Turno.objects.create(
+                empleado=tecnico_diurno,
+                fecha=fecha,
+                inicio=time(8),
+                fin=time(16),
+            )
+            fecha += timedelta(days=1)
+
+        respuesta = self.client.get(
+            '/api/partes/exportar-periodo/',
+            {'periodo': '2026-09'},
+        )
+
+        self.assertEqual(respuesta.status_code, 200)
+        with ZipFile(BytesIO(respuesta.content)) as archivo_zip:
+            contenido_excel = archivo_zip.read(
+                'Parte-Trabajo-2026-10-12.xlsx'
+            )
+            libro = load_workbook(
+                BytesIO(contenido_excel),
+                data_only=True,
+            )
+            recursos = [
+                libro['Parte'].cell(fila, 1).value
+                for fila in range(2, libro['Parte'].max_row + 1)
+            ]
+            self.assertEqual(recursos, ['77026| TÉCNICO NOCTURNO'])
+            libro.close()
+
+            ruta_plantilla = (
+                Path(__file__).resolve().parent
+                / 'plantillas'
+                / 'Plantilla Parte Trabajov2.xlsx'
+            )
+            with ZipFile(BytesIO(contenido_excel)) as excel_generado, ZipFile(
+                ruta_plantilla
+            ) as plantilla:
+                self.assertEqual(
+                    excel_generado.namelist(),
+                    plantilla.namelist(),
+                )
+                for nombre in plantilla.namelist():
+                    if nombre != 'xl/worksheets/sheet1.xml':
+                        self.assertEqual(
+                            excel_generado.read(nombre),
+                            plantilla.read(nombre),
+                            nombre,
+                        )
+                self.assertIn(
+                    b'<x14:dataValidations count="6"',
+                    excel_generado.read('xl/worksheets/sheet1.xml'),
+                )
+
     def test_rechaza_periodo_invalido(self):
         respuesta = self.client.get(
             '/api/partes/exportar-periodo/',
@@ -2252,7 +2377,7 @@ class ExportacionPartesNocturnosTests(TestCase):
         self.assertEqual(self.empleado.rol, supervisor_rol)
         self.assertEqual(self.empleado.numero_recurso, '')
 
-    def test_incluye_empleado_inactivo_con_turnos_historicos(self):
+    def test_omite_tecnico_inactivo_con_turnos_historicos_del_zip(self):
         anterior = Empleado.objects.create(
             nombre='Técnico retirado',
             numero_recurso='77099',
@@ -2282,8 +2407,12 @@ class ExportacionPartesNocturnosTests(TestCase):
                 hoja.cell(fila, 1).value
                 for fila in range(2, hoja.max_row + 1)
             }
-            self.assertIn('77099| TÉCNICO RETIRADO', recursos)
-            self.assertIn(2, [hoja.cell(fila, 7).value for fila in range(2, hoja.max_row + 1)])
+            self.assertNotIn('77099| TÉCNICO RETIRADO', recursos)
+            self.assertIn('77026| TÉCNICO NOCTURNO', recursos)
+            self.assertEqual(
+                hoja.cell(2, 7).value,
+                4,
+            )
             libro.close()
 
     def test_exporta_solo_tecnicos_y_omite_supervisores(self):

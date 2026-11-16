@@ -17,7 +17,10 @@ from .models import (
     AsignacionActaRetribucion, AsignacionSemanal, Empleado, Franja,
     Novedad, Rol, Turno,
 )
-from .exportacion import crear_zip_partes, rango_periodo_15_a_15
+from .exportacion import (
+    crear_excel_diario, crear_zip_partes, horas_nocturnas,
+    rango_periodo_15_a_15,
+)
 from .servicios import (
     FESTIVOS_COLOMBIA_2026, CambioInvalido, CoberturaInsuficiente,
     agregar_descanso, cambiar_descansos, cambiar_franja_tecnico,
@@ -580,6 +583,73 @@ def api_exportar_semana_excel(request):
 
 @require_GET
 @solo_staff
+def api_exportar_parte_diario(request):
+    texto_fecha = request.GET.get('fecha')
+    fecha = _leer_fecha(texto_fecha)
+    if not texto_fecha or fecha is None:
+        return JsonResponse(
+            {'error': 'Indica una fecha válida con el formato AAAA-MM-DD.'},
+            status=400,
+        )
+
+    turnos = list(
+        Turno.objects.filter(
+            fecha=fecha,
+            empleado__activo=True,
+        ).filter(
+            Q(empleado__rol__nombre__iexact='Tecnico')
+            | Q(empleado__rol__nombre__iexact='Técnico')
+        ).select_related('empleado').order_by('empleado__nombre')
+    )
+    empleados = [
+        turno.empleado
+        for turno in turnos
+        if horas_nocturnas(turno, fecha)
+    ]
+    sin_recurso = [
+        empleado.nombre for empleado in empleados
+        if not empleado.numero_recurso
+    ]
+    if sin_recurso:
+        return JsonResponse(
+            {
+                'error': (
+                    'Completa el No. Recurso de estos técnicos en '
+                    '«Personal y horarios» antes de exportar: '
+                    + ', '.join(sin_recurso)
+                )
+            },
+            status=400,
+        )
+
+    numeros_recurso = [empleado.numero_recurso for empleado in empleados]
+    if len(numeros_recurso) != len(set(numeros_recurso)):
+        return JsonResponse(
+            {
+                'error': (
+                    'Hay números de recurso repetidos entre los técnicos '
+                    'incluidos en la exportación.'
+                )
+            },
+            status=400,
+        )
+
+    contenido = crear_excel_diario(fecha, empleados, turnos)
+    respuesta = HttpResponse(
+        contenido,
+        content_type=(
+            'application/vnd.openxmlformats-officedocument.'
+            'spreadsheetml.sheet'
+        ),
+    )
+    respuesta['Content-Disposition'] = (
+        f'attachment; filename="parte-trabajo-{fecha.isoformat()}.xlsx"'
+    )
+    return respuesta
+
+
+@require_GET
+@solo_staff
 def api_exportar_partes_periodo(request):
     try:
         fecha_inicio, fecha_fin = rango_periodo_15_a_15(
@@ -589,11 +659,12 @@ def api_exportar_partes_periodo(request):
         return JsonResponse({'error': str(error)}, status=400)
 
     filtro_empleados_periodo = (
-        (
-            Q(activo=True)
-            & (Q(fecha_ingreso__isnull=True) | Q(fecha_ingreso__lte=fecha_fin))
+        Q(activo=True)
+        & (
+            Q(fecha_ingreso__isnull=True)
+            | Q(fecha_ingreso__lte=fecha_fin)
+            | Q(turno__fecha__range=(fecha_inicio, fecha_fin))
         )
-        | Q(turno__fecha__range=(fecha_inicio, fecha_fin))
     )
     empleados = list(
         Empleado.objects.filter(
@@ -646,8 +717,6 @@ def api_exportar_partes_periodo(request):
     }
     dias_sin_turno = set()
     for empleado in empleados:
-        if not empleado.activo:
-            continue
         for indice in range((fecha_fin - fecha_inicio).days + 1):
             fecha = fecha_inicio + timedelta(days=indice)
             if empleado.fecha_ingreso and fecha < empleado.fecha_ingreso:

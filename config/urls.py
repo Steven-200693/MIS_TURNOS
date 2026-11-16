@@ -34,6 +34,11 @@ urlpatterns = [
         views.api_exportar_partes_periodo,
         name='api_exportar_partes_periodo',
     ),
+    path(
+        'api/partes/exportar-diario/',
+        views.api_exportar_parte_diario,
+        name='api_exportar_parte_diario',
+    ),
     path('api/generar/', views.api_generar, name='api_generar'),
     path(
         'api/tecnicos/distribucion/',

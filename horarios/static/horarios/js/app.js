@@ -39,6 +39,7 @@ const $btnLimpiar = document.getElementById('btn-limpiar');
 const $btnCopiarImagen = document.getElementById('btn-copiar-imagen');
 const $btnExportarExcel = document.getElementById('btn-exportar-excel');
 const $btnExportarPartes = document.getElementById('btn-exportar-partes');
+const $fechaParteDiario = document.getElementById('fecha-parte-diario');
 const $mesPartes = document.getElementById('mes-partes');
 const $distribucionTecnicos = document.getElementById('distribucion-tecnicos');
 const $distribucionResumen = document.getElementById('distribucion-resumen');
@@ -49,6 +50,7 @@ const ES_ADMIN = document.body.dataset.admin === '1';
 
 // Fecha que se está mostrando, como texto 'AAAA-MM-DD'
 let fechaActual = aTexto(new Date());
+if ($fechaParteDiario) $fechaParteDiario.value = fechaActual;
 if ($mesPartes) $mesPartes.value = fechaActual.slice(0, 7);
 let datosSemana = null;   // última respuesta de /api/semana/
 let asignacionActa = null;
