@@ -1038,11 +1038,14 @@ def _verificar_horas(empleado, fecha):
 
 
 @transaction.atomic
-def cambiar_franja_tecnico(empleado, fecha, franja_id, forzar=False):
-    """Cambia la franja del técnico en los turnos generados de toda la semana."""
-    if empleado.rol.nombre.casefold().replace('é', 'e') != 'tecnico':
-        raise CambioInvalido("Esta opción solo está disponible para técnicos.")
-    if empleado.fecha_ingreso and fecha < empleado.fecha_ingreso:
+def cambiar_franja_semanal(empleado, fecha, franja_id, forzar=False):
+    """Cambia la franja del técnico o supervisor en toda la semana generada."""
+    rol = empleado.rol.nombre.casefold().replace('é', 'e')
+    if rol not in ('tecnico', 'supervisor'):
+        raise CambioInvalido(
+            "Esta opción solo está disponible para técnicos y supervisores."
+        )
+    if rol == 'tecnico' and empleado.fecha_ingreso and fecha < empleado.fecha_ingreso:
         raise CambioInvalido(
             "La fecha seleccionada es anterior al ingreso del técnico."
         )
@@ -1051,7 +1054,9 @@ def cambiar_franja_tecnico(empleado, fecha, franja_id, forzar=False):
         pk=franja_id, rol_id=empleado.rol_id
     ).first()
     if franja_nueva is None:
-        raise CambioInvalido("La franja seleccionada no pertenece al rol del técnico.")
+        raise CambioInvalido(
+            "La franja seleccionada no pertenece al rol del empleado."
+        )
 
     lunes = lunes_de(fecha)
     turnos = list(

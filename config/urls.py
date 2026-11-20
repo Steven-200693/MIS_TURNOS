@@ -74,7 +74,16 @@ urlpatterns = [
         name='api_supervisor_fin_de_semana_intercambiar',
     ),
     path('api/turnos/horario/', views.api_turno_horario, name='api_turno_horario'),
-    path('api/tecnicos/franja/', views.api_tecnico_franja, name='api_tecnico_franja'),
+    path(
+        'api/empleados/franja/',
+        views.api_franja_semanal,
+        name='api_empleado_franja_semanal',
+    ),
+    path(
+        'api/tecnicos/franja/',
+        views.api_franja_semanal,
+        name='api_tecnico_franja',
+    ),
     path('api/novedades/guardar/', views.api_novedad_guardar, name='api_novedad_guardar'),
     path(
         'api/vacaciones/fecha-fin/',

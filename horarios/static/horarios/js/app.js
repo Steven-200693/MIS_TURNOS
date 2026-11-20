@@ -1053,7 +1053,7 @@ const $dtDescansoTrabajarBtn = document.getElementById('dt-descanso-trabajar-btn
 const $dtCambio = document.getElementById('dt-cambio');
 const $dtCompanero = document.getElementById('dt-companero');
 const $dtCambioBtn = document.getElementById('dt-cambio-btn');
-const $dtFranjaTecnico = document.getElementById('dt-franja-tecnico');
+const $dtFranjaSemanal = document.getElementById('dt-franja-semanal');
 const $dtFranjaSelect = document.getElementById('dt-franja-select');
 const $dtFranjaBtn = document.getElementById('dt-franja-btn');
 const $dtFinSemana = document.getElementById('dt-fin-semana');
@@ -1085,8 +1085,8 @@ function abrirEdicion(emp, dia) {
 
   // Opción 1: mover el descanso a este día (solo si hoy trabaja)
   const esSupervisor = emp.rol.toLowerCase() === 'supervisor';
-  const esTecnico = emp.rol.normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '').toLowerCase() === 'tecnico';
+  const puedeCambiarFranja = ['tecnico', 'supervisor']
+    .includes(normalizarRol(emp.rol));
   const indiceDia = datosSemana.dias.indexOf(dia);
   const indiceCalendario = desdeTexto(dia).getDay();
   const esFinDeSemana =
@@ -1219,28 +1219,30 @@ function abrirEdicion(emp, dia) {
   $dtHorario.classList.toggle('hidden', !puedeEditarHorario);
   $dtInicio.value = puedeEditarHorario ? turno.inicio : '';
 
-  const franjasTecnico = esTecnico
-    ? datosSemana.franjas.filter(franja => franja.rol === emp.rol)
+  const franjasDisponibles = puedeCambiarFranja
+    ? datosSemana.franjas.filter(
+      franja => normalizarRol(franja.rol) === normalizarRol(emp.rol)
+    )
     : [];
   $dtFranjaSelect.replaceChildren();
-  franjasTecnico.forEach(franja => {
+  franjasDisponibles.forEach(franja => {
     $dtFranjaSelect.add(new Option(
       `${franja.nombre} · ${franja.hora_inicio}–${franja.hora_fin}`,
       franja.id,
       false,
-      franja.nombre === emp.franja
+      franja.id === turno.franja_id
     ));
   });
-  $dtFranjaTecnico.classList.toggle(
+  $dtFranjaSemanal.classList.toggle(
     'hidden',
-    !esTecnico || franjasTecnico.length < 2
+    !puedeCambiarFranja || franjasDisponibles.length < 2
   );
 
   if (
     !puedeMover && !puedeAgregarDescanso && !puedeConvertirDescanso
     && !hayCompaneros && !puedeEditarHorario
     && !(usaIntercambioFinSemana && supervisores.length > 0)
-    && !(esTecnico && franjasTecnico.length > 1)
+    && !(puedeCambiarFranja && franjasDisponibles.length > 1)
   ) {
     $dtError.textContent =
       turno.descanso && actual === dia && diasAlternativos.length === 0
@@ -1305,7 +1307,7 @@ $dtCambioBtn.addEventListener('click', () => {
 });
 
 $dtFranjaBtn.addEventListener('click', () => {
-  ejecutarCambio('/api/tecnicos/franja/', {
+  ejecutarCambio('/api/empleados/franja/', {
     empleado_id: contexto.emp.id,
     fecha: contexto.dia,
     franja_id: Number($dtFranjaSelect.value),

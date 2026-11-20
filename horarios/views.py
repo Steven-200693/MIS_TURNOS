@@ -23,7 +23,7 @@ from .exportacion import (
 )
 from .servicios import (
     FESTIVOS_COLOMBIA_2026, CambioInvalido, CoberturaInsuficiente,
-    agregar_descanso, cambiar_descansos, cambiar_franja_tecnico,
+    agregar_descanso, cambiar_descansos, cambiar_franja_semanal,
     cambiar_horario, convertir_descanso_en_trabajo, fecha_fin_vacaciones,
     _asignaciones_fin_de_semana, distribucion_tecnicos_semana, generar_semana,
     intercambiar_descansos, intercambiar_fin_de_semana_supervisores, lunes_de,
@@ -1267,7 +1267,7 @@ def api_turno_horario(request):
 
 @require_POST
 @solo_staff
-def api_tecnico_franja(request):
+def api_franja_semanal(request):
     datos = _leer_json(request) or {}
     empleado = _buscar_empleado(datos.get('empleado_id'))
     fecha = _fecha_estricta(datos.get('fecha'))
@@ -1279,10 +1279,10 @@ def api_tecnico_franja(request):
         or isinstance(franja_id, bool)
     ):
         return JsonResponse(
-            {'error': 'Faltan datos: técnico, fecha o franja.'}, status=400
+            {'error': 'Faltan datos: empleado, fecha o franja.'}, status=400
         )
     return _respuesta_cambio(
-        lambda: cambiar_franja_tecnico(
+        lambda: cambiar_franja_semanal(
             empleado,
             fecha,
             franja_id,

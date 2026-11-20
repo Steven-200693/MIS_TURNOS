@@ -1906,6 +1906,59 @@ class EdicionHorarioManualTests(TestCase):
             {tarde.id},
         )
 
+    def test_cambia_franja_del_supervisor_toda_la_semana(self):
+        rol_supervisor = Rol.objects.create(nombre='Supervisor', horas_por_dia=6)
+        franja_manana = Franja.objects.create(
+            rol=rol_supervisor,
+            nombre='Mañana supervisor',
+            hora_inicio='06:00',
+            minimo_personas=0,
+        )
+        franja_tarde = Franja.objects.create(
+            rol=rol_supervisor,
+            nombre='Tarde supervisor',
+            hora_inicio='12:00',
+            minimo_personas=0,
+        )
+        supervisor = Empleado.objects.create(
+            nombre='Supervisora editable',
+            rol=rol_supervisor,
+            franja=franja_manana,
+        )
+        generar_semana(self.lunes)
+
+        respuesta = self.client.post(
+            '/api/empleados/franja/',
+            data={
+                'empleado_id': supervisor.id,
+                'fecha': (self.lunes + timedelta(days=2)).isoformat(),
+                'franja_id': franja_tarde.id,
+            },
+            content_type='application/json',
+        )
+
+        self.assertEqual(respuesta.status_code, 200, respuesta.content)
+        turnos = list(Turno.objects.filter(
+            empleado=supervisor,
+            fecha__range=(self.lunes, self.lunes + timedelta(days=6)),
+        ))
+        self.assertEqual(len(turnos), 7)
+        for turno in turnos:
+            self.assertEqual(turno.franja_id, franja_tarde.id)
+            self.assertTrue(turno.manual)
+            if not turno.descanso:
+                self.assertEqual(turno.inicio.isoformat(), '12:00:00')
+                self.assertEqual(turno.fin.isoformat(), '18:00:00')
+
+        generar_semana(self.lunes)
+        self.assertEqual(
+            set(Turno.objects.filter(
+                empleado=supervisor,
+                fecha__range=(self.lunes, self.lunes + timedelta(days=6)),
+            ).values_list('franja_id', flat=True)),
+            {franja_tarde.id},
+        )
+
     def test_rechaza_cambiar_franja_de_otro_rol_y_no_tecnico(self):
         rol_supervisor = Rol.objects.create(nombre='Supervisor', horas_por_dia=6)
         franja_supervisor = Franja.objects.create(
