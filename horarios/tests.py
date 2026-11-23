@@ -8,6 +8,7 @@ from django.contrib.auth.models import User
 from django.test import TestCase
 from openpyxl import load_workbook
 
+from .exportacion import horas_nocturnas
 from .models import (
     AsignacionActaRetribucion, AsignacionSemanal, Empleado, Franja, Novedad,
     Rol, Turno,
@@ -2114,6 +2115,18 @@ class ExportacionPartesNocturnosTests(TestCase):
             )
             fecha += timedelta(days=1)
 
+    def test_recargo_nocturno_inicia_a_las_seis_de_la_tarde(self):
+        turno = Turno(
+            fecha=date(2026, 10, 12),
+            inicio=time(17),
+            fin=time(18),
+        )
+        self.assertEqual(horas_nocturnas(turno, turno.fecha), 0)
+
+        turno.inicio = time(18)
+        turno.fin = time(19)
+        self.assertEqual(horas_nocturnas(turno, turno.fecha), 1)
+
     def test_exporta_zip_con_un_excel_por_dia_y_formato_de_la_plantilla(self):
         respuesta = self.client.get(
             '/api/partes/exportar-periodo/',
@@ -2147,7 +2160,7 @@ class ExportacionPartesNocturnosTests(TestCase):
             hoja = libro['Parte']
             self.assertEqual(hoja.max_column, 18)
             self.assertEqual(hoja['A2'].value, '77026| TÉCNICO NOCTURNO')
-            self.assertEqual(hoja['G2'].value, 4)
+            self.assertEqual(hoja['G2'].value, 5)
             self.assertIsNone(hoja['D2'].value)
             self.assertEqual(hoja['O2'].value, 'OP01| OPERADORA HOSPITAL BOSA')
             self.assertEqual(
@@ -2207,7 +2220,7 @@ class ExportacionPartesNocturnosTests(TestCase):
             if hoja.cell(fila, 1).value
         ]
         self.assertEqual(recursos, ['77026| TÉCNICO NOCTURNO'])
-        self.assertEqual(hoja['G2'].value, 4)
+        self.assertEqual(hoja['G2'].value, 5)
         libro.close()
 
     def test_exporta_parte_diario_rechaza_fecha_invalida(self):
@@ -2464,7 +2477,7 @@ class ExportacionPartesNocturnosTests(TestCase):
             self.assertIn('77026| TÉCNICO NOCTURNO', recursos)
             self.assertEqual(
                 hoja.cell(2, 7).value,
-                4,
+                5,
             )
             libro.close()
 

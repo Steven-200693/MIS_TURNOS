@@ -48,7 +48,7 @@ def horas_nocturnas(turno, fecha):
     if fin_turno <= inicio_turno:
         fin_turno += timedelta(days=1)
 
-    inicio_ventana = datetime.combine(fecha, time(19))
+    inicio_ventana = datetime.combine(fecha, time(18))
     fin_ventana = datetime.combine(fecha + timedelta(days=1), time(6))
     inicio = max(inicio_turno, inicio_ventana)
     fin = min(fin_turno, fin_ventana)
